@@ -1,0 +1,39 @@
+services:
+
+  # ─── Servicio de la base de datos ─────────────────────────────────────────
+  db:
+    image: postgres:16-alpine  # Imagen oficial de PostgreSQL, versión liviana
+    restart: always            # Reinicia automáticamente si el contenedor falla
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # Persistencia de datos entre reinicios
+    ports:
+      - "5432:5432"  # Expone la DB al host (útil para conectarse con un cliente como DBeaver)
+
+  # ─── Servicio de la aplicación Django ─────────────────────────────────────
+  web:
+    build: .            # Construye la imagen usando el Dockerfile de este directorio
+    restart: always
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app          # Monta el código local en el contenedor (hot reload en desarrollo)
+    ports:
+      - "8000:8000"     # Expone Django al host en http://localhost:8000
+    environment:
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: ${DEBUG}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: db  # Nombre del servicio de base de datos (Docker lo resuelve automáticamente)
+      POSTGRES_PORT: 5432
+    depends_on:
+      - db  # Asegura que la DB arranque antes que Django
+
+# ─── Volúmenes nombrados ─────────────────────────────────────────────────────
+volumes:
+  postgres_data:  # Los datos de PostgreSQL sobreviven aunque el contenedor se elimine
+
