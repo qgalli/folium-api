@@ -1,4 +1,4 @@
-# Imagen base oficial de Python 3.12 en su versión slim (liviana)
+# Imagen base oficial de Python 3.12 en su versión slim 
 FROM python:3.12-slim
 
 # Evita que Python genere archivos .pyc en disco
