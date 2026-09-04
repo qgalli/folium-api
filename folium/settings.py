@@ -12,6 +12,9 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Ruta base del proyecto (directorio raíz donde está manage.py)
 BASE_DIR = Path(__file__).resolve().parent.parent
