@@ -1,26 +1,20 @@
 """
-URL configuration for folium project.
-
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.1/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
+Rutas principales de folium.
+Acá se conectan las distintas partes del sistema con sus direcciones web.
 """
+
 from django.contrib import admin
 from django.urls import include, path
 
 urlpatterns = [
+    # Panel de administración de Django (http://localhost:8000/admin/)
+    path('admin/', admin.site.urls),
     path('admin/', admin.site.urls),
 
-        # Browsable API de DRF. Una herramienta buenísima. Les super recomiendo aprender a usar esto
-        # Busquen algún tutorial de "Browsable API DRF"
+    # Browsable API de DRF. Una herramienta buenísima. Les super recomiendo aprender a usar esto
+    # Busquen algún tutorial de "Browsable API DRF"
     path("api-auth/", include("rest_framework.urls")) 
+
+    # Pantalla de inicio de sesión visual para probar la API desde el navegador
+    path('api-auth/', include('rest_framework.urls')),
 ]
