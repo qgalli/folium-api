@@ -40,9 +40,11 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    # Paquetes de terceros
+
+        # Paquetes de terceros
     'rest_framework',
-    # Apps del proyecto
+
+        # Apps del proyecto
     'folium_api',
 ]
 
