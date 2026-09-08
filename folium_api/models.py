@@ -91,7 +91,7 @@ class Loan(models.Model):
     
 class Reservation(models.Model):
     class StatusReservation(models.TextChoices):
-        PENDING = 'PENDING', 'Pendiente',
+        PENDING = 'PENDING', 'Pendiente'
         COMPLETED = 'COMPLETED', 'Completado'
         CANCELED = 'CANCELLED', 'Cancelado'
         EXPIRED = 'EXPIRED', 'Expirado'
