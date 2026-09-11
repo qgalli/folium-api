@@ -1,3 +1,5 @@
+from django.contrib.auth.models import AbstractUser
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
@@ -121,29 +123,37 @@ class Item(models.Model):
     def __str__(self):
         return self.inventory_code
 
-class User(models.Model):
+class User(AbstractUser):
     class Rol(models.TextChoices):
-        LIBRIAN = "LIBRIAN", "Bibliotecario"
+        LIBRARIAN = "LIBRARIAN", "Bibliotecario"
         USER = "USER", "Usuario"
         ADMIN = "ADMIN", "Administrador"
 
-    name = models.CharField(max_length=45)
-    last_name = models.CharField(max_length=45)
-    email = models.EmailField(unique=True, max_length=45)
-    password_hash = models.CharField(max_length=45)
-    rol = models.CharField(max_length=20, choices=Rol.choices)
-    created_at = models.DateTimeField(auto_now_add=True)
+    # AbstractUser ya provee estos campos de forma automática:
+    # - username: nombre de usuario para iniciar sesión
+    # - first_name / last_name: nombre y apellido
+    # - email: correo electrónico
+    # - password: contraseña ya hasheada (nunca se guarda en texto plano)
+    # - is_active: si el usuario está activo o no (útil para soft delete)
+    # - date_joined: cuándo se registró
+
+    # Sobreescribimos email para que sea único y requerido
+    email = models.EmailField(unique=True)
+
+    # Campos propios del proyecto
+    rol = models.CharField(max_length=20, choices=Rol.choices, default=Rol.USER)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
 
     def clean(self):
+        super().clean()
         errors = {}
 
-        # Regla 1: El nombre solo debe contener letras
-        if self.name and not re.match(r"^[a-zA-ZÀ-ÿ\s'-]+$", self.name):
-            errors['name'] = 'El nombre solo puede contener letras, espacios, apóstrofes y guiones.'
+        # Regla 1: El nombre solo debe contener letras, espacios, apóstrofes y guiones
+        if self.first_name and not re.match(r"^[a-zA-ZÀ-ÿ\s'-]+$", self.first_name):
+            errors['first_name'] = 'El nombre solo puede contener letras, espacios, apóstrofes y guiones.'
 
-        # Regla 2: El apellido solo debe contener letras
+        # Regla 2: El apellido solo debe contener letras, espacios, apóstrofes y guiones
         if self.last_name and not re.match(r"^[a-zA-ZÀ-ÿ\s'-]+$", self.last_name):
             errors['last_name'] = 'El apellido solo puede contener letras, espacios, apóstrofes y guiones.'
 
@@ -154,9 +164,15 @@ class User(models.Model):
         if errors:
             raise ValidationError(errors)
 
+    def __str__(self):
+        return f"{self.first_name} {self.last_name} ({self.email})"
+
+
+
 class Loan(models.Model):
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="loans")
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="loans")
+    # Usamos settings.AUTH_USER_MODEL para apuntar siempre al modelo de usuario activo del proyecto
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="loans")
     loaned_at = models.DateTimeField()
     due_at = models.DateTimeField()
     returned_at = models.DateTimeField(blank=True, null=True)
@@ -178,16 +194,17 @@ class Loan(models.Model):
             raise ValidationError(errors)
 
     def __str__(self):
-        return f"Loan #{self.id} - User: {self.user.name} - Item: {self.item.inventory_code}"
-    
+        return f"Loan #{self.id} - User: {self.user.get_full_name()} - Item: {self.item.inventory_code}"
+
 class Reservation(models.Model):
     class StatusReservation(models.TextChoices):
         PENDING = 'PENDING', 'Pendiente'
         COMPLETED = 'COMPLETED', 'Completado'
         CANCELED = 'CANCELLED', 'Cancelado'
         EXPIRED = 'EXPIRED', 'Expirado'
+
     book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='reservations')
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reservations')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='reservations')
     status = models.CharField(max_length=20, choices=StatusReservation.choices, default=StatusReservation.PENDING)
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
@@ -216,10 +233,10 @@ class Reservation(models.Model):
 
     def __str__(self):
         return f"Reservation #{self.id} - Book: {self.book.title}"
-    
+
 class Review(models.Model):
     book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='reviews')
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reviews')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='reviews')
     rating = models.IntegerField()
     comment = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -248,4 +265,4 @@ class Review(models.Model):
             raise ValidationError(errors)
 
     def __str__(self):
-        return f"Review by {self.user.name} for {self.book.title} ({self.rating}/5)"
+        return f"Review by {self.user.get_full_name()} for {self.book.title} ({self.rating}/5)"

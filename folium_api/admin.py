@@ -33,8 +33,10 @@ class ItemAdmin(admin.ModelAdmin):
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
     list_display = ('name', 'last_name', 'email', 'rol')
+    list_display = ('first_name', 'last_name', 'email', 'rol')
     list_filter = ('rol',)
     search_fields = ('name', 'last_name', 'email')
+    search_fields = ('first_name', 'last_name', 'email')
 
 @admin.register(Loan)
 class LoanAdmin(admin.ModelAdmin):

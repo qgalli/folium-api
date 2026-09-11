@@ -31,6 +31,8 @@ DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 # Hosts permitidos; en desarrollo con Docker se acepta cualquier host
 ALLOWED_HOSTS = ['*']
 
+# Le dice a Django que use nuestro modelo de usuario personalizado en lugar del que viene por defecto
+AUTH_USER_MODEL = 'folium_api.User'
 
 # ─── Aplicaciones instaladas ──────────────────────────────────────────────────
 INSTALLED_APPS = [
