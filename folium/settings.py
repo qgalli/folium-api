@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 import os
 from pathlib import Path
+from datetime import timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -46,6 +47,7 @@ INSTALLED_APPS = [
 
         # Paquetes de terceros
     'rest_framework',
+    'rest_framework_simplejwt',
 
         # Apps del proyecto
     'folium_api',
@@ -136,12 +138,18 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
-    # Autenticación por sesión (navegador) y autenticación básica (para desarrollo)
+    # Autenticación por JWT, sesión (navegador) y básica (para desarrollo)
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication', 
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.BasicAuthentication',
     ],
+}
+
+# ─── JWT (djangorestframework-simplejwt) ──────────────────────────────────────
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
 }
 
 
