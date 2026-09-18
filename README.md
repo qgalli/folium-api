@@ -131,6 +131,9 @@ python -c "from django.core.management.utils import get_random_secret_key; print
 > [!WARNING]
 > Nunca commitees el archivo `.env` al repositorio. Contiene credenciales sensibles.
 
+> [!WARNING]
+> El username y contraseña de administrador es `admin`
+
 > [!NOTE]
 > El hot reload está activado: cualquier cambio en el código Python se refleja automáticamente sin necesidad de reiniciar el contenedor.
 
