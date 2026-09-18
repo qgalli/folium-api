@@ -126,8 +126,7 @@ class Item(models.Model):
 class User(AbstractUser):
     class Rol(models.TextChoices):
         LIBRARIAN = "LIBRARIAN", "Bibliotecario"
-        USER = "USER", "Usuario"
-        ADMIN = "ADMIN", "Administrador"
+        USER = "READER", "Lector"
 
     # AbstractUser ya provee estos campos de forma automática:
     # - username: nombre de usuario para iniciar sesión
