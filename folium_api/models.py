@@ -56,6 +56,7 @@ class Book(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
+    cover_image = models.ImageField(upload_to='books/covers/', blank=True, null=True)
 
     def clean(self):
         errors = {}
@@ -126,7 +127,8 @@ class Item(models.Model):
 class User(AbstractUser):
     class Rol(models.TextChoices):
         LIBRARIAN = "LIBRARIAN", "Bibliotecario"
-        USER = "READER", "Lector"
+        USER = "USER", "Usuario"
+        ADMIN = "ADMIN", "Administrador"
 
     # AbstractUser ya provee estos campos de forma automática:
     # - username: nombre de usuario para iniciar sesión
