@@ -81,7 +81,39 @@ TEMPLATES = [
     },
 ]
 
+# En desarrollo (DEBUG=True) se aceptan todos los orígenes para facilitar el trabajo local.
+# En producción (DEBUG=False) solo se permite el origen definido en FRONTEND_URL.
 CORS_ALLOW_ALL_ORIGINS = DEBUG
+
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get('FRONTEND_URLS', 'http://localhost:3000').split(',')
+    if origin.strip()
+]
+
+# Permite que el navegador envíe cookies y el header Authorization (necesario para JWT).
+CORS_ALLOW_CREDENTIALS = True
+
+# Métodos HTTP que el frontend puede usar.
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+# Headers que el frontend puede incluir en sus requests.
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'authorization',
+    'content-type',
+    'origin',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
 WSGI_APPLICATION = 'folium.wsgi.application'
 
 
