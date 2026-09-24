@@ -1,3 +1,4 @@
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from .models import * # Importamos todos los modelos del archivo `models.py` (que está en este mismo directorio)
 
