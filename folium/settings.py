@@ -131,6 +131,12 @@ USE_TZ = True
 # ─── Archivos estáticos ───────────────────────────────────────────────────────
 STATIC_URL = 'static/'
 
+# ─── Archivos de media (subidos por usuarios / seeds) ──────────────────────────
+# MEDIA_ROOT es la carpeta real en disco donde se guardan los archivos (ej. portadas).
+# Como el volumen del docker-compose monta ".:/app", esta carpeta persiste en el host
+# aunque se recree el contenedor. Ya está en .dockerignore, así que no se versiona.
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # ─── Django REST Framework ────────────────────────────────────────────────────
 REST_FRAMEWORK = {

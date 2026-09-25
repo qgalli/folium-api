@@ -11,17 +11,35 @@ Con Docker:
 """
 import random
 from datetime import timedelta
+from pathlib import Path
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
+from django.core.files.images import ImageFile
 
 from django.core.management.base import CommandError
 
 from folium_api.models import Author, Genre, Book, Item, Loan, Reservation, Review
 
 User = get_user_model()
+
+# Carpeta con los archivos fuente de portadas (se versiona en git).
+# El seed las copia a MEDIA_ROOT/books/covers/ vía cover_image.save(),
+# nunca escribe la ruta a mano.
+COVERS_DIR = Path(__file__).resolve().parent.parent.parent / "seed_assets" / "covers"
+COVER_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"]
+
+
+def _find_cover_file(isbn):
+    """Busca en COVERS_DIR un archivo llamado '<isbn>.<ext>'. Devuelve el Path
+    si existe, o None si el libro no tiene portada disponible."""
+    for ext in COVER_EXTENSIONS:
+        candidate = COVERS_DIR / f"{isbn}{ext}"
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _check_max_length(model, field_name, value, context):
@@ -294,6 +312,7 @@ class Command(BaseCommand):
     # ── Libros ───────────────────────────────────────────────────────────
     def _seed_books(self, authors, genres):
         books = []
+        con_portada = 0
         for title, autores, genero_nombres, year, isbn, desc in LIBROS:
             book, created = Book.objects.get_or_create(
                 isbn=isbn,
@@ -306,8 +325,19 @@ class Command(BaseCommand):
             if created:
                 book.authors.set([authors[key] for key in autores])
                 book.genres.set([genres[g] for g in genero_nombres])
+
+                cover_path = _find_cover_file(isbn)
+                if cover_path:
+                    with open(cover_path, "rb") as f:
+                        # .save() copia el archivo a MEDIA_ROOT/books/covers/
+                        # y guarda la ruta relativa en el campo; no hay que
+                        # armar ese path a mano.
+                        book.cover_image.save(cover_path.name, ImageFile(f), save=True)
+                    con_portada += 1
             books.append(book)
-        self.stdout.write(self.style.SUCCESS(f"Libros: {len(books)}"))
+        self.stdout.write(
+            self.style.SUCCESS(f"Libros: {len(books)} (con portada: {con_portada})")
+        )
         return books
 
     # ── Ítems (copias físicas) ──────────────────────────────────────────

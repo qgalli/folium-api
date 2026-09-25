@@ -6,6 +6,8 @@ Acá se conectan las distintas partes del sistema con sus direcciones web.
 from django.contrib import admin
 from django.urls import include, path
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from django.conf import settings
+from django.conf.urls.static import static
 
 urlpatterns = [
     # Panel de administración de Django (http://localhost:8000/admin/)
@@ -21,3 +23,8 @@ urlpatterns = [
     path('api/v1/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/v1/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 ]
+
+# Sirve los archivos de /media (portadas, etc.) durante desarrollo.
+# En producción esto lo debería servir el proxy (nginx, S3, etc.), no Django.
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
