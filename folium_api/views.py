@@ -4,6 +4,7 @@ from django.shortcuts import render
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import *
 from .serializers import *
 
@@ -28,6 +29,10 @@ class ContactView(View):
 # ==========================================
 # PERMISOS PERSONALIZADOS
 # ==========================================
+
+class FoliumTokenObtainPairView(TokenObtainPairView):
+        serializer_class = FoliumTokenObtainPairSerializer
+
 
 class IsLibrarian(permissions.BasePermission):
     """

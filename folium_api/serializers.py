@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .models import * # Importamos todos los modelos del archivo `models.py` (que está en este mismo directorio)
 
 # Crear serializadores acá
@@ -17,6 +18,14 @@ from .models import * # Importamos todos los modelos del archivo `models.py` (qu
 
 
 User = get_user_model()
+
+
+class FoliumTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token["rol"] = User.Rol.ADMIN if user.is_superuser else user.rol
+        return token
 
 
 # ==========================================
