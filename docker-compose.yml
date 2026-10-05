@@ -21,7 +21,7 @@ services:
     volumes:
       - .:/app          # Monta el código local en el contenedor (hot reload en desarrollo)
     ports:
-      - "8000:8000"     # Expone Django al host en http://localhost:8000
+      - "8080:8000"     # Expone Django al host en http://localhost:8000
     environment:
       SECRET_KEY: ${SECRET_KEY}
       DEBUG: ${DEBUG}
