@@ -1,3 +1,5 @@
+import re
+from datetime import datetime
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -42,6 +44,20 @@ class AuthorSerializer(serializers.ModelSerializer):
             "last_name",
             "biography",
         ]
+    def _validate_name_field(self, value, field_label):
+        if not isinstance(value, str) or str(value).isdigit():
+            raise serializers.ValidationError(f"{field_label} debe ser una cadena de texto válida.")
+        
+        pattern = r"^[a-zA-ZÀ-ÿ\s'-]+$"
+        if not re.match(pattern, str(value)):
+            raise serializers.ValidationError(f"{field_label} solo puede contener letras, espacios, apóstrofes y guiones.")
+        return value
+
+    def validate_name(self, value):
+        return self._validate_name_field(value, "El nombre")
+
+    def validate_last_name(self, value):
+        return self._validate_name_field(value, "El apellido")
 
 
 class AuthorSummarySerializer(serializers.ModelSerializer):
@@ -62,7 +78,22 @@ class GenreSerializer(serializers.ModelSerializer):
             "name",
             "description",
         ]
+    def validate_name(self, value):
+        str_val = str(value).strip()
+        
+        if str_val.isdigit():
+            raise serializers.ValidationError("El nombre del género no puede consistir únicamente de números.")
 
+        # Validación case-insensitive de unicidad
+        queryset = Genre.objects.filter(name__iexact=str_val)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+            
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un género registrado con este nombre.")
+
+        return str_val
+    
 
 class GenreSummarySerializer(serializers.ModelSerializer):
     class Meta:
@@ -219,7 +250,22 @@ class BookWriteSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
         ]
+    def validate_isbn(self, value):
+        clean_isbn = re.sub(r'[\s-]', '', str(value))
+        if not clean_isbn.isdigit():
+            raise serializers.ValidationError("El ISBN solo puede contener números (y guiones).")
+        if len(clean_isbn) not in (10, 13):
+            raise serializers.ValidationError("El ISBN debe tener exactamente 10 o 13 dígitos.")
+        return value
 
+    def validate_publication_year(self, value):
+        current_year = datetime.now().year
+        if value > current_year:
+            raise serializers.ValidationError(f"El año de publicación no puede ser posterior al año actual ({current_year}).")
+        if value < 868:
+            raise serializers.ValidationError("El año de publicación no puede ser anterior al año 868 d.C.")
+        return value
+    
 
 class BookListSerializer(serializers.ModelSerializer):
     authors = AuthorSummarySerializer(
@@ -306,7 +352,39 @@ class LoanWriteSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
         ]
+    def validate(self, attrs):
+        loaned_at = attrs.get("loaned_at")
+        due_at = attrs.get("due_at")
+        returned_at = attrs.get("returned_at")
+        item = attrs.get("item")
 
+        # 1. Validaciones de fechas
+        if due_at and loaned_at and due_at <= loaned_at:
+            raise serializers.ValidationError({"due_at": "La fecha de vencimiento debe ser posterior a la fecha de inicio del préstamo."})
+
+        if returned_at and loaned_at and returned_at < loaned_at:
+            raise serializers.ValidationError({"returned_at": "La fecha de devolución no puede ser anterior a la fecha de inicio del préstamo."})
+
+        # 2. Validación de disponibilidad del ejemplar
+        if item:
+            # Comprobar si el item ya está en uso o tiene un préstamo activo
+            active_loan = Loan.objects.filter(item=item, returned_at__isnull=True)
+            if self.instance:
+                active_loan = active_loan.exclude(pk=self.instance.pk)
+
+            if active_loan.exists() or item.status != Item.Status.AVAILABLE:
+                raise serializers.ValidationError({"item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."})
+
+        return attrs
+
+    def create(self, validated_data):
+        loan = super().create(validated_data)
+        # Marcar el ejemplar como PRESTADO al momento del alta
+        item = loan.item
+        item.status = Item.Status.LOANED
+        item.save()
+        return loan
+    
 
 class LoanReadSerializer(serializers.ModelSerializer):
     item_code = serializers.CharField(
