@@ -486,3 +486,27 @@ class ReviewSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+        
+# ==========================================
+# FAVORITOS
+# ==========================================
+
+        
+class FavoriteSerializer(serializers.ModelSerializer):
+    user_detail = UserSummarySerializer(source="user", read_only=True)
+    book_detail = BookSimpleSerializer(source="book", read_only=True)
+
+    class Meta:
+        model = User.favorites.through
+        fields = [
+            "id",
+            "user",
+            "user_detail",
+            "book",
+            "book_detail",
+        ]
+        read_only_fields = ["id"]
+
+    def create(self, validated_data):
+        favorite, _ = self.Meta.model.objects.get_or_create(**validated_data)
+        return favorite
