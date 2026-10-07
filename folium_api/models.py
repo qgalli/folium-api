@@ -145,6 +145,12 @@ class User(AbstractUser):
     rol = models.CharField(max_length=20, choices=Rol.choices, default=Rol.USER)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
+    
+    favorites = models.ManyToManyField(
+        'Book', 
+        related_name='favorited_by', 
+        blank=True
+    )
 
     def clean(self):
         super().clean()
