@@ -29,6 +29,17 @@ class FoliumTokenObtainPairSerializer(TokenObtainPairSerializer):
         token["rol"] = User.Rol.ADMIN if user.is_superuser else user.rol
         return token
 
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        
+        data["user"] = {
+            "id": self.user.id,
+            "username": self.user.username,
+            "rol": User.Rol.ADMIN if self.user.is_superuser else self.user.rol
+        }
+        
+        return data
+
 
 # ==========================================
 # SERIALIZERS BÁSICOS
