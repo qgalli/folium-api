@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -181,6 +182,43 @@ class UserSummarySerializer(serializers.ModelSerializer):
 
     def get_full_name(self, obj):
         return obj.get_full_name()
+
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "email",
+            "first_name",
+            "last_name",
+            "rol",
+            "date_joined",
+        ]
+        read_only_fields = [
+            "id",
+            "rol",
+            "date_joined",
+        ]
+
+    def validate_username(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("El nombre de usuario no puede estar vacío.")
+        cleaned_value = str(value).strip()
+        user = self.instance
+        if User.objects.filter(username__iexact=cleaned_value).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este nombre de usuario.")
+        return cleaned_value
+
+    def validate_email(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("El correo electrónico no puede estar vacío.")
+        cleaned_value = str(value).strip()
+        user = self.instance
+        if User.objects.filter(email__iexact=cleaned_value).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este correo electrónico.")
+        return cleaned_value
 
 
 # ==========================================
@@ -475,9 +513,39 @@ class ReservationSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
+            "user",
             "created_at",
             "updated_at",
         ]
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else getattr(self.instance, "user", None)
+        book = attrs.get("book", getattr(self.instance, "book", None))
+        expires_at = attrs.get("expires_at", getattr(self.instance, "expires_at", None))
+
+        # Regla 1: La fecha de expiración debe ser en el futuro
+        if expires_at and expires_at <= timezone.now():
+            raise serializers.ValidationError({
+                "expires_at": "La fecha de expiración debe ser en el futuro."
+            })
+
+        # Regla 2: Un usuario no puede tener dos reservas PENDING para el mismo libro
+        if user and user.is_authenticated and book:
+            duplicate_qs = Reservation.objects.filter(
+                user=user,
+                book=book,
+                status=Reservation.StatusReservation.PENDING
+            )
+            if self.instance:
+                duplicate_qs = duplicate_qs.exclude(pk=self.instance.pk)
+
+            if duplicate_qs.exists():
+                raise serializers.ValidationError({
+                    "book": "Ya existe una reserva pendiente para este libro por parte del usuario."
+                })
+
+        return attrs
 
 
 # ==========================================
@@ -510,9 +578,39 @@ class ReviewSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
+            "user",
             "created_at",
             "updated_at",
         ]
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else getattr(self.instance, "user", None)
+        book = attrs.get("book", getattr(self.instance, "book", None))
+        rating = attrs.get("rating", getattr(self.instance, "rating", None))
+
+        # Regla 1: Rating entre 1 y 5
+        if rating is not None and not (1 <= rating <= 5):
+            raise serializers.ValidationError({
+                "rating": "La calificación debe ser un valor entre 1 y 5."
+            })
+
+        # Regla 2: Un usuario no puede dejar más de una reseña activa por libro
+        if user and user.is_authenticated and book:
+            duplicate_qs = Review.objects.filter(
+                user=user,
+                book=book,
+                deleted_at__isnull=True
+            )
+            if self.instance:
+                duplicate_qs = duplicate_qs.exclude(pk=self.instance.pk)
+
+            if duplicate_qs.exists():
+                raise serializers.ValidationError({
+                    "book": "El usuario ya tiene una reseña activa para este libro."
+                })
+
+        return attrs
         
 # ==========================================
 # FAVORITOS
