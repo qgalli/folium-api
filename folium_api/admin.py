@@ -1,6 +1,12 @@
 from django.contrib import admin
-from .models import *
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.contrib.auth.forms import UserCreationForm
+from .models import *
+
+class CustomUserCreationForm(UserCreationForm):
+    class Meta(UserCreationForm.Meta):
+        model = User
+        fields = ('username', 'email', 'first_name', 'last_name', 'rol', 'is_staff')
 
 @admin.register(Author)
 class AuthorAdmin(admin.ModelAdmin):
@@ -32,10 +38,29 @@ class ItemAdmin(admin.ModelAdmin):
     autocomplete_fields = ('book',) 
 
 @admin.register(User)
-class UserAdmin(admin.ModelAdmin):
+class UserAdmin(BaseUserAdmin):
+    add_form = CustomUserCreationForm
     list_display = ('first_name', 'last_name', 'email', 'rol')
     list_filter = ('rol',)
     search_fields = ('first_name', 'last_name', 'email')
+    ordering = ('username',)
+    # Pantalla de edición de un usuario existente
+    fieldsets = (
+        ('Credentials', {'fields': ('username', 'password')}),
+        ('Personal Information', {'fields': ('first_name', 'last_name', 'email', 'rol')}),
+        ('Access Permissions', {
+            'fields': ('is_active', 'is_staff', 'is_superuser'),
+            'description': 'Nota: Un LIBRARIAN requiere tener "is_staff" tildado para poder ingresar a este panel.'
+        }),
+        ('Audit', {'fields': ('date_joined', 'deleted_at')}),
+    )
+    # Pantalla de creación de nuevo usuario (con password1 y password2 con hashing)
+    add_fieldsets = (
+        (None, {
+            'classes': ('wide',),
+            'fields': ('username', 'email', 'first_name', 'last_name', 'rol', 'is_staff', 'password1', 'password2'),
+        }),
+    )
 
 @admin.register(Loan)
 class LoanAdmin(admin.ModelAdmin):

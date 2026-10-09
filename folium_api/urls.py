@@ -27,6 +27,9 @@ router.register(r'author', views.AuthorViewSet, basename='author')
 # Registro del ViewSet de Author
 router.register(r'genre', views.GenreViewSet, basename='genre')
 
+# Registro del ViewSet de Favoritos
+router.register(r'favorites', views.FavoriteViewSet, basename='favorite')
+
 urlpatterns = [
     # Incluye las rutas automáticas creadas por el router
     path('', include(router.urls)),

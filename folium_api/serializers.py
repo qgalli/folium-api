@@ -353,10 +353,10 @@ class LoanWriteSerializer(serializers.ModelSerializer):
             "id",
         ]
     def validate(self, attrs):
-        loaned_at = attrs.get("loaned_at")
-        due_at = attrs.get("due_at")
-        returned_at = attrs.get("returned_at")
-        item = attrs.get("item")
+        loaned_at = attrs.get("loaned_at", getattr(self.instance, "loaned_at", None))
+        due_at = attrs.get("due_at", getattr(self.instance, "due_at", None))
+        returned_at = attrs.get("returned_at", getattr(self.instance, "returned_at", None))
+        item = attrs.get("item", getattr(self.instance, "item", None))
 
         # 1. Validaciones de fechas
         if due_at and loaned_at and due_at <= loaned_at:
@@ -371,10 +371,11 @@ class LoanWriteSerializer(serializers.ModelSerializer):
             active_loan = Loan.objects.filter(item=item, returned_at__isnull=True)
             if self.instance:
                 active_loan = active_loan.exclude(pk=self.instance.pk)
-
-            if active_loan.exists() or item.status != Item.Status.AVAILABLE:
+            
+            is_new_or_different_item = not self.instance or self.instance.item != item
+            if active_loan.exists() or (is_new_or_different_item and item.status != Item.Status.AVAILABLE):
                 raise serializers.ValidationError({"item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."})
-
+        
         return attrs
 
     def create(self, validated_data):
@@ -383,6 +384,21 @@ class LoanWriteSerializer(serializers.ModelSerializer):
         item = loan.item
         item.status = Item.Status.LOANED
         item.save()
+        return loan
+
+    def update(self, instance, validated_data):
+        previous_item = instance.item
+        loan = super().update(instance, validated_data)
+        # Si cambiaron el ejemplar físico, liberamos el anterior
+        if previous_item != loan.item:
+            previous_item.status = Item.Status.AVAILABLE
+            previous_item.save()
+        # Si ya tiene fecha de devolución, vuelve a estar DISPONIBLE; si no, queda PRESTADO
+        if loan.returned_at is not None:
+            loan.item.status = Item.Status.AVAILABLE
+        else:
+            loan.item.status = Item.Status.LOANED
+        loan.item.save()
         return loan
     
 
@@ -505,7 +521,7 @@ class FavoriteSerializer(serializers.ModelSerializer):
             "book",
             "book_detail",
         ]
-        read_only_fields = ["id"]
+        read_only_fields = ["id", "user"]
 
     def create(self, validated_data):
         favorite, _ = self.Meta.model.objects.get_or_create(**validated_data)

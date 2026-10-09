@@ -81,7 +81,7 @@ El comando genera automáticamente cuentas con distintos roles para pruebas en e
 Podés obtener un token JWT enviando una solicitud `POST` a `/api/v1/token/`:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/token/ \
+curl -X POST http://localhost:8080/api/v1/token/ \
   -H "Content-Type: application/json" \
   -d '{"username": "admin", "password": "admin1234"}'
 ```
@@ -93,6 +93,6 @@ Authorization: Bearer <tu_token_access>
 ```
 
 Y consultá los recursos principales:
-* Libros: `GET http://localhost:8000/api/v1/book/`
-* Copias físicas (ítems): `GET http://localhost:8000/api/v1/items/`
-* Préstamos: `GET http://localhost:8000/api/v1/loan/`
+* Libros: `GET http://localhost:8080/api/v1/book/`
+* Copias físicas (ítems): `GET http://localhost:8080/api/v1/items/`
+* Préstamos: `GET http://localhost:8080/api/v1/loan/`
