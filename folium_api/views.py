@@ -96,6 +96,11 @@ class LoanViewSet(viewsets.ModelViewSet):
         serializer_class = LoanWriteSerializer
         permission_classes = [IsLibrarian]
 
+        def get_serializer_class(self):
+                if self.action in ['list', 'retrieve']:
+                        return LoanReadSerializer
+                return LoanWriteSerializer
+
 
 class BookViewSet(viewsets.ModelViewSet):
         """
@@ -132,3 +137,21 @@ class GenreViewSet(viewsets.ModelViewSet):
         queryset = Genre.objects.all()
         serializer_class = GenreSerializer
         permission_classes = [IsLibrarianOrReadOnly]
+
+class FavoriteViewSet(viewsets.ModelViewSet):
+        """
+        Controlador para que los usuarios gestionen sus libros favoritos.
+        """
+        serializer_class = FavoriteSerializer
+        permission_classes = [permissions.IsAuthenticated]
+        http_method_names = ['get', 'post', 'delete', 'head', 'options']
+
+        def get_queryset(self):
+                # Filtra por el usuario logueado y optimiza la carga de relaciones
+                return User.favorites.through.objects.filter(
+                        user=self.request.user
+                ).select_related('user', 'book')
+
+        def perform_create(self, serializer):
+                # Asocia el favorito a la persona que mandó el token
+                serializer.save(user=self.request.user)

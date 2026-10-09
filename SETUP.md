@@ -100,8 +100,8 @@ Este comando crea las tablas necesarias en la base de datos. Solo necesitás hac
 
 Una vez completados los pasos anteriores, la aplicación está disponible desde el navegador en:
 
-- API: http://localhost:8000
-- Panel de administración: http://localhost:8000/admin
+- API: http://localhost:8080
+- Panel de administración: http://localhost:8080/admin
 
 ---
 
@@ -162,7 +162,7 @@ newgrp docker
 
 ### "port is already in use" (el puerto ya está en uso)
 
-Otro programa está usando el puerto 8000 o 5432. Reiniciá tu computadora e intentá de nuevo.
+Otro programa está usando el puerto 8080 o 5432. Reiniciá tu computadora e intentá de nuevo.
 
 ### Docker no arranca o da error de conexión
 

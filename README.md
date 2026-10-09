@@ -35,7 +35,7 @@ docker compose up --build
 ```
 
 Esto construye la imagen de Django e inicia dos contenedores:
-- **`web`** → Django corriendo en [http://localhost:8000](http://localhost:8000)
+- **`web`** → Django corriendo en [http://localhost:8080](http://localhost:8080)
 - **`db`** → PostgreSQL en el puerto `5432`
 
 La primera vez puede tardar un poco mientras Docker descarga las imágenes base.
@@ -56,7 +56,7 @@ docker compose exec web python manage.py migrate
 docker compose exec web python manage.py createsuperuser
 ```
 
-Luego accedé al admin en [http://localhost:8000/admin](http://localhost:8000/admin).
+Luego accedé al admin en [http://localhost:8080/admin](http://localhost:8080/admin).
 
 ### Crear nuevas migraciones después de modificar modelos
 

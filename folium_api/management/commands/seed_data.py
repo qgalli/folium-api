@@ -300,11 +300,13 @@ class Command(BaseCommand):
                 if key in seen:
                     continue
                 seen.add(key)
-                author, _ = Author.objects.get_or_create(
-                    name=nombre,
-                    last_name=apellido,
-                    defaults={"biography": f"Autor/a de obras reconocidas dentro de la literatura universal."},
-                )
+                author = Author.objects.filter(name=nombre, last_name=apellido).first()
+                if not author:
+                    author = Author.objects.create(
+                        name=nombre,
+                        last_name=apellido,
+                        biography="Autor/a de obras reconocidas dentro de la literatura universal.",
+                    )
                 authors[key] = author
         self.stdout.write(self.style.SUCCESS(f"Autores: {len(authors)}"))
         return authors
@@ -462,12 +464,13 @@ class Command(BaseCommand):
             loaned_at = now - timedelta(days=random.randint(1, 20))
             due_at = loaned_at + timedelta(days=14)
             # Se usa el ítem como clave única: un ítem prestado solo tiene un préstamo activo.
-            _, created = Loan.objects.get_or_create(
-                item=item,
-                returned_at__isnull=True,
-                defaults={"user": user, "loaned_at": loaned_at, "due_at": due_at},
-            )
-            if created:
+            if not Loan.objects.filter(item=item, returned_at__isnull=True).exists():
+                Loan.objects.create(
+                    item=item,
+                    user=user,
+                    loaned_at=loaned_at,
+                    due_at=due_at,
+                )
                 count += 1
 
         # Algunos préstamos históricos ya devueltos (sobre ítems disponibles)
@@ -477,13 +480,14 @@ class Command(BaseCommand):
             loaned_at = now - timedelta(days=random.randint(30, 90))
             due_at = loaned_at + timedelta(days=14)
             returned_at = loaned_at + timedelta(days=random.randint(3, 13))
-            # Se usa el ítem como clave única para mantener el seed idempotente.
-            _, created = Loan.objects.get_or_create(
-                item=item,
-                returned_at__isnull=False,
-                defaults={"user": user, "loaned_at": loaned_at, "due_at": due_at, "returned_at": returned_at},
-            )
-            if created:
+            if not Loan.objects.filter(item=item, returned_at__isnull=False).exists():
+                Loan.objects.create(
+                    item=item,
+                    user=user,
+                    loaned_at=loaned_at,
+                    due_at=due_at,
+                    returned_at=returned_at,
+                )
                 count += 1
 
         self.stdout.write(self.style.SUCCESS(f"Préstamos: {count}"))
@@ -508,12 +512,14 @@ class Command(BaseCommand):
                 weights=[40, 30, 15, 15],
             )[0]
             expires_at = now + timedelta(days=random.randint(2, 10))
-            Reservation.objects.get_or_create(
-                book=book,
-                user=user,
-                defaults={"status": status, "expires_at": expires_at},
-            )
-            count += 1
+            if not Reservation.objects.filter(book=book, user=user).exists():
+                Reservation.objects.create(
+                    book=book,
+                    user=user,
+                    status=status,
+                    expires_at=expires_at,
+                )
+                count += 1
 
         self.stdout.write(self.style.SUCCESS(f"Reservas: {count}"))
 
@@ -553,12 +559,14 @@ class Command(BaseCommand):
             else:
                 comment = random.choice(comentarios_negativos)
 
-            Review.objects.get_or_create(
-                book=book,
-                user=user,
-                defaults={"rating": rating, "comment": comment},
-            )
-            count += 1
+            if not Review.objects.filter(book=book, user=user).exists():
+                Review.objects.create(
+                    book=book,
+                    user=user,
+                    rating=rating,
+                    comment=comment,
+                )
+                count += 1
 
         self.stdout.write(self.style.SUCCESS(f"Reseñas: {count}"))
 
