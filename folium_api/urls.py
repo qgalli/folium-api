@@ -30,14 +30,22 @@ router.register(r'genre', views.GenreViewSet, basename='genre')
 # Registro del ViewSet de Favoritos
 router.register(r'favorites', views.FavoriteViewSet, basename='favorite')
 
+# Registro del ViewSet de Reservas (Lector)
+router.register(r'reservations', views.ReservationViewSet, basename='reservation')
+
+# Registro del ViewSet de Reseñas (Lector)
+router.register(r'reviews', views.ReviewViewSet, basename='review')
+
 urlpatterns = [
+    # Ruta pública de autoregistro
+    path('register/', views.ReaderRegistrationView.as_view(), name='reader-register'),
+
+    # Perfil del usuario autenticado (Lector / Bibliotecario / Admin)
+    path('me/', views.UserProfileView.as_view(), name='user-profile'),
+
     # Incluye las rutas automáticas creadas por el router
     path('', include(router.urls)),
     
     # Rutas personalizadas basadas en vistas clase o funciones (ejemplo):
     # path('contacto/', views.ContactView.as_view(), name='contacto'),
 ]
-
-
-
-

@@ -4,6 +4,7 @@ from django.shortcuts import render
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import *
 from .serializers import *
@@ -90,11 +91,26 @@ class ItemViewSet(viewsets.ModelViewSet):
 
 class LoanViewSet(viewsets.ModelViewSet):
         """
-        Controlador para que el bibliotecario gestione el préstamo.
+        Controlador para gestionar los préstamos.
+        - Bibliotecarios/Admin: gestión completa de todos los préstamos.
+        - Lectores: solo lectura de sus propios préstamos.
         """
-        queryset = Loan.objects.all()
         serializer_class = LoanWriteSerializer
-        permission_classes = [IsLibrarian]
+        permission_classes = [IsLibrarianOrReadOnly]
+
+        def get_queryset(self):
+                user = self.request.user
+                # Bibliotecarios y administradores pueden ver todos los préstamos
+                if user.is_authenticated and (
+                        user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
+                        or user.is_staff
+                        or user.is_superuser
+                ):
+                        return Loan.objects.all()
+                # Lectores únicamente pueden ver sus propios préstamos
+                if user.is_authenticated:
+                        return Loan.objects.filter(user=user)
+                return Loan.objects.none()
 
         def get_serializer_class(self):
                 if self.action in ['list', 'retrieve']:
@@ -155,3 +171,85 @@ class FavoriteViewSet(viewsets.ModelViewSet):
         def perform_create(self, serializer):
                 # Asocia el favorito a la persona que mandó el token
                 serializer.save(user=self.request.user)
+
+# ==========================================
+# VISTAS DEL LECTOR
+# ==========================================
+
+class ReaderRegistrationView(generics.CreateAPIView):
+        """
+        Controlador público para el autoregistro de lectores.
+        """
+        queryset = User.objects.all()
+        serializer_class = UserSerializer
+        permission_classes = [permissions.AllowAny]
+
+        def perform_create(self, serializer):
+        # Asignamos explícitamente el rol USER al nuevo registrado
+                serializer.save(rol=User.Rol.USER)
+
+
+class UserProfileView(generics.RetrieveUpdateAPIView):
+        """
+        Permite al usuario autenticado consultar (GET) y actualizar (PATCH/PUT)
+        sus datos de perfil personal.
+        """
+        serializer_class = UserProfileSerializer
+        permission_classes = [permissions.IsAuthenticated]
+
+        def get_object(self):
+                return self.request.user
+
+
+class ReservationViewSet(viewsets.ModelViewSet):
+        """
+        Controlador para que los lectores gestionen sus reservas.
+        """
+        serializer_class = ReservationSerializer
+        permission_classes = [permissions.IsAuthenticated]
+
+        def get_queryset(self):
+                # Un lector solo ve sus propias reservas
+                return Reservation.objects.filter(user=self.request.user)
+
+        def perform_create(self, serializer):
+                # Asigna automáticamente el usuario que hace la solicitud
+                serializer.save(user=self.request.user)
+
+
+class ReviewViewSet(viewsets.ModelViewSet):
+        """
+        Controlador para que los lectores gestionen y consulten reseñas.
+        - Filtrado por ?book=<id>: lista todas las reseñas activas de ese libro.
+        - Sin filtro: lista únicamente las reseñas del usuario autenticado ("Mis reseñas").
+        - Modificaciones/Eliminaciones: solo permitidas al autor de la reseña.
+        """
+        serializer_class = ReviewSerializer
+        permission_classes = [permissions.IsAuthenticated]
+
+        def get_queryset(self):
+                queryset = Review.objects.filter(deleted_at__isnull=True)
+
+                # Acciones de modificación o eliminación restringidas al autor
+                if self.action in ['update', 'partial_update', 'destroy']:
+                        return queryset.filter(user=self.request.user)
+
+                # Si se filtra por libro, mostrar todas las reseñas comunitarias de ese libro
+                book_id = self.request.query_params.get('book')
+                if book_id is not None:
+                        if book_id.isdigit():
+                                return queryset.filter(book_id=int(book_id))
+                        return Review.objects.none()
+
+                # Sin filtro de libro: muestra las reseñas del propio usuario autenticado ("Mis reseñas")
+                return queryset.filter(user=self.request.user)
+
+        def perform_create(self, serializer):
+                # Asigna automáticamente el usuario que hace la solicitud
+                serializer.save(user=self.request.user)
+
+        def perform_destroy(self, instance):
+                from django.utils import timezone
+                # Soft delete para reseñas
+                instance.deleted_at = timezone.now()
+                instance.save()
