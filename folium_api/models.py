@@ -50,6 +50,7 @@ class Book(models.Model):
     )
     
     title = models.CharField(max_length=45)
+    editorial = models.CharField(max_length=150, blank=True)
     isbn = models.CharField(max_length=13, unique=True)
     description = models.TextField(blank=True)
     publication_year = models.IntegerField(null=True, blank=True)
@@ -124,6 +125,18 @@ class Item(models.Model):
     def __str__(self):
         return self.inventory_code
 
+class Tier(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+    level_rank = models.PositiveSmallIntegerField(unique=True)
+    monthly_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    max_active_items = models.PositiveSmallIntegerField()
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+
+
 class User(AbstractUser):
     class Rol(models.TextChoices):
         LIBRARIAN = "LIBRARIAN", "Bibliotecario"
@@ -143,6 +156,12 @@ class User(AbstractUser):
 
     # Campos propios del proyecto
     rol = models.CharField(max_length=20, choices=Rol.choices, default=Rol.USER)
+    tier = models.ForeignKey(
+        Tier,
+        on_delete=models.PROTECT,
+        related_name="users",
+    )
+    tier_expires_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
     
@@ -170,6 +189,22 @@ class User(AbstractUser):
 
         if errors:
             raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        if self.tier_id is None:
+            self.tier, _ = Tier.objects.get_or_create(
+                name="Free",
+                defaults={
+                    "level_rank": 1,
+                    "monthly_price": 0.00,
+                    "max_active_items": 1,
+                },
+            )
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                kwargs["update_fields"] = set(update_fields) | {"tier"}
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} ({self.email})"
