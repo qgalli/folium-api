@@ -203,14 +203,26 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
 class ReservationViewSet(viewsets.ModelViewSet):
         """
-        Controlador para que los lectores gestionen sus reservas.
+        Controlador para gestionar las reservas.
+        - Bibliotecarios/Admin: visualización y gestión de todas las reservas.
+        - Lectores: gestión únicamente de sus propias reservas.
         """
         serializer_class = ReservationSerializer
         permission_classes = [permissions.IsAuthenticated]
 
         def get_queryset(self):
+                user = self.request.user
+                # Bibliotecarios y administradores pueden ver y gestionar todas las reservas
+                if user.is_authenticated and (
+                        user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
+                        or user.is_staff
+                        or user.is_superuser
+                ):
+                        return Reservation.objects.all()
                 # Un lector solo ve sus propias reservas
-                return Reservation.objects.filter(user=self.request.user)
+                if user.is_authenticated:
+                        return Reservation.objects.filter(user=user)
+                return Reservation.objects.none()
 
         def perform_create(self, serializer):
                 # Asigna automáticamente el usuario que hace la solicitud

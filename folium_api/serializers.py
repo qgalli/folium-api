@@ -581,18 +581,19 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         request = self.context.get("request")
-        user = getattr(request, "user", None) if request else getattr(self.instance, "user", None)
+        user = getattr(self.instance, "user", None) if self.instance else getattr(request, "user", None)
         book = attrs.get("book", getattr(self.instance, "book", None))
         expires_at = attrs.get("expires_at", getattr(self.instance, "expires_at", None))
+        status_val = attrs.get("status", getattr(self.instance, "status", Reservation.StatusReservation.PENDING))
 
-        # Regla 1: La fecha de expiración debe ser en el futuro
-        if expires_at and expires_at <= timezone.now():
+        # Regla 1: La fecha de expiración debe ser en el futuro (al crear o modificar expires_at)
+        if (not self.instance or "expires_at" in attrs) and expires_at and expires_at <= timezone.now():
             raise serializers.ValidationError({
                 "expires_at": "La fecha de expiración debe ser en el futuro."
             })
 
         # Regla 2: Un usuario no puede tener dos reservas PENDING para el mismo libro
-        if user and user.is_authenticated and book:
+        if user and user.is_authenticated and book and status_val == Reservation.StatusReservation.PENDING:
             duplicate_qs = Reservation.objects.filter(
                 user=user,
                 book=book,
