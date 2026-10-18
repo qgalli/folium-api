@@ -169,6 +169,7 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "username",
+            "dni",
             "first_name",
             "last_name",
             "email",
@@ -189,6 +190,18 @@ class UserSerializer(serializers.ModelSerializer):
             "date_joined",
             "updated_at",
         ]
+
+    def validate_dni(self, value):
+        if value is None:
+            raise serializers.ValidationError("El DNI es obligatorio.")
+        if value <= 0:
+            raise serializers.ValidationError("El DNI debe ser un número positivo.")
+        qs = User.objects.filter(dni=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este DNI.")
+        return value
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
@@ -241,6 +254,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "username",
+            "dni",
             "email",
             "first_name",
             "last_name",
@@ -267,6 +281,16 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if User.objects.filter(username__iexact=cleaned_value).exclude(pk=user.pk).exists():
             raise serializers.ValidationError("Ya existe un usuario registrado con este nombre de usuario.")
         return cleaned_value
+
+    def validate_dni(self, value):
+        if value is None:
+            raise serializers.ValidationError("El DNI es obligatorio.")
+        if value <= 0:
+            raise serializers.ValidationError("El DNI debe ser un número positivo.")
+        user = self.instance
+        if User.objects.filter(dni=value).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este DNI.")
+        return value
 
     def validate_email(self, value):
         if not value or not str(value).strip():

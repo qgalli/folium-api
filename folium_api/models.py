@@ -155,6 +155,7 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
 
     # Campos propios del proyecto
+    dni = models.IntegerField(unique=True)
     rol = models.CharField(max_length=20, choices=Rol.choices, default=Rol.USER)
     tier = models.ForeignKey(
         Tier,
@@ -186,6 +187,10 @@ class User(AbstractUser):
         # Regla 3: La fecha de eliminación (soft-delete) no puede ser en el futuro
         if self.deleted_at and self.deleted_at > timezone.now():
             errors['deleted_at'] = 'La fecha de eliminación no puede ser en el futuro.'
+
+        # Regla 4: El DNI debe ser un número positivo
+        if self.dni is not None and self.dni <= 0:
+            errors['dni'] = 'El DNI debe ser un número positivo.'
 
         if errors:
             raise ValidationError(errors)
