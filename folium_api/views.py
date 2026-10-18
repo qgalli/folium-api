@@ -231,20 +231,34 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
 class ReviewViewSet(viewsets.ModelViewSet):
         """
-        Controlador para que los lectores gestionen y consulten reseñas.
+        Controlador para que los lectores gestionen y consulten reseñas,
+        y para que los bibliotecarios moderen (eliminen) comentarios ofensivos.
         - Filtrado por ?book=<id>: lista todas las reseñas activas de ese libro.
         - Sin filtro: lista únicamente las reseñas del usuario autenticado ("Mis reseñas").
-        - Modificaciones/Eliminaciones: solo permitidas al autor de la reseña.
+        - Modificaciones: solo permitidas al autor de la reseña.
+        - Eliminaciones: permitidas al autor o a bibliotecarios/administradores.
         """
         serializer_class = ReviewSerializer
         permission_classes = [permissions.IsAuthenticated]
 
         def get_queryset(self):
                 queryset = Review.objects.filter(deleted_at__isnull=True)
+                user = self.request.user
+                is_moderator = user.is_authenticated and (
+                        user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
+                        or user.is_staff
+                        or user.is_superuser
+                )
 
-                # Acciones de modificación o eliminación restringidas al autor
-                if self.action in ['update', 'partial_update', 'destroy']:
-                        return queryset.filter(user=self.request.user)
+                # Eliminación permitida a bibliotecarios/admin (moderación) o al propio autor
+                if self.action == 'destroy':
+                        if is_moderator:
+                                return queryset
+                        return queryset.filter(user=user)
+
+                # Modificación restringida únicamente al autor
+                if self.action in ['update', 'partial_update']:
+                        return queryset.filter(user=user)
 
                 # Si se filtra por libro, mostrar todas las reseñas comunitarias de ese libro
                 book_id = self.request.query_params.get('book')
@@ -254,7 +268,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
                         return Review.objects.none()
 
                 # Sin filtro de libro: muestra las reseñas del propio usuario autenticado ("Mis reseñas")
-                return queryset.filter(user=self.request.user)
+                return queryset.filter(user=user)
 
         def perform_create(self, serializer):
                 # Asigna automáticamente el usuario que hace la solicitud
