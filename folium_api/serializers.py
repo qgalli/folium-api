@@ -462,9 +462,12 @@ class BookDetailSerializer(serializers.ModelSerializer):
         return obj.items.count()
 
     def get_available_items(self, obj):
-        return obj.items.filter(
-            status=Item.Status.AVAILABLE
+        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
+        pending_reservations = obj.reservations.filter(
+            status=Reservation.StatusReservation.PENDING
         ).count()
+        return max(0, available - pending_reservations)
+
 
 
 # ==========================================
