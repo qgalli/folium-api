@@ -4,6 +4,36 @@ import django.db.models.deletion
 from django.db import migrations, models
 
 
+def migrate_book_editorials(apps, schema_editor):
+    Book = apps.get_model('folium_api', 'Book')
+    Editorial = apps.get_model('folium_api', 'Editorial')
+    database = schema_editor.connection.alias
+    books = Book.objects.using(database)
+    editorials = Editorial.objects.using(database)
+
+    fallback, _ = editorials.get_or_create(name='Sin editorial')
+
+    for name in books.values_list('editorial_legacy', flat=True).distinct().iterator():
+        if name is None or not name.strip():
+            editorial = fallback
+            query = books.filter(editorial_legacy=name)
+        else:
+            editorial, _ = editorials.get_or_create(name=name)
+            query = books.filter(editorial_legacy=name)
+        query.update(editorial_id=editorial.pk)
+
+
+def restore_book_editorials(apps, schema_editor):
+    Book = apps.get_model('folium_api', 'Book')
+    database = schema_editor.connection.alias
+    books = Book.objects.using(database)
+
+    for book_id, editorial_name in books.values_list(
+        'pk', 'editorial__name'
+    ).iterator():
+        books.filter(pk=book_id).update(editorial_legacy=editorial_name)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -20,9 +50,36 @@ class Migration(migrations.Migration):
                 ('updated_at', models.DateTimeField(auto_now=True)),
             ],
         ),
+        migrations.RenameField(
+            model_name='book',
+            old_name='editorial',
+            new_name='editorial_legacy',
+        ),
+        migrations.AddField(
+            model_name='book',
+            name='editorial',
+            field=models.ForeignKey(
+                null=True,
+                on_delete=django.db.models.deletion.PROTECT,
+                related_name='books',
+                to='folium_api.editorial',
+            ),
+        ),
+        migrations.RunPython(
+            migrate_book_editorials,
+            restore_book_editorials,
+        ),
+        migrations.RemoveField(
+            model_name='book',
+            name='editorial_legacy',
+        ),
         migrations.AlterField(
             model_name='book',
             name='editorial',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='books', to='folium_api.editorial'),
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.PROTECT,
+                related_name='books',
+                to='folium_api.editorial',
+            ),
         ),
     ]
