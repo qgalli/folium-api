@@ -116,6 +116,31 @@ class GenreSummarySerializer(serializers.ModelSerializer):
         ]
 
 
+class EditorialSummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Editorial
+        fields = [
+            "id",
+            "name",
+        ]
+
+
+class EditorialSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Editorial
+        fields = [
+            "id",
+            "name",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+        ]
+
+
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
         write_only=True,
@@ -298,6 +323,8 @@ class ItemSummarySerializer(serializers.ModelSerializer):
 
 
 class BookSimpleSerializer(serializers.ModelSerializer):
+    editorial = EditorialSummarySerializer(read_only=True)
+
     class Meta:
         model = Book
         fields = [
@@ -309,6 +336,10 @@ class BookSimpleSerializer(serializers.ModelSerializer):
 
 
 class BookWriteSerializer(serializers.ModelSerializer):
+    editorial = serializers.PrimaryKeyRelatedField(
+        queryset=Editorial.objects.all(),
+    )
+
     class Meta:
         model = Book
         fields = [
@@ -343,6 +374,7 @@ class BookWriteSerializer(serializers.ModelSerializer):
     
 
 class BookListSerializer(serializers.ModelSerializer):
+    editorial = EditorialSummarySerializer(read_only=True)
     authors = AuthorSummarySerializer(
         many=True,
         read_only=True,
@@ -367,6 +399,7 @@ class BookListSerializer(serializers.ModelSerializer):
 
 
 class BookDetailSerializer(serializers.ModelSerializer):
+    editorial = EditorialSummarySerializer(read_only=True)
     authors = AuthorSerializer(
         many=True,
         read_only=True,

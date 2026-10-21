@@ -38,6 +38,14 @@ class Genre(models.Model):
     def __str__(self):
         return self.name
 
+class Editorial(models.Model):
+    name = models.CharField(max_length=150, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
 class Book(models.Model):
     authors = models.ManyToManyField(
         Author, 
@@ -50,7 +58,11 @@ class Book(models.Model):
     )
     
     title = models.CharField(max_length=45)
-    editorial = models.CharField(max_length=150, blank=True)
+    editorial = models.ForeignKey(
+        Editorial,
+        on_delete=models.PROTECT,
+        related_name="books",
+    )
     isbn = models.CharField(max_length=13, unique=True)
     description = models.TextField(blank=True)
     publication_year = models.IntegerField(null=True, blank=True)
