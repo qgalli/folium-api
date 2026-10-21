@@ -47,46 +47,6 @@ class FoliumTokenObtainPairSerializer(TokenObtainPairSerializer):
 # ==========================================
 
 
-class TierSummarySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Tier
-        fields = [
-            "id",
-            "name",
-            "level_rank",
-            "max_active_items",
-        ]
-
-
-class TierSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Tier
-        fields = [
-            "id",
-            "name",
-            "level_rank",
-            "monthly_price",
-            "max_active_items",
-            "description",
-            "created_at",
-        ]
-        read_only_fields = [
-            "id",
-            "created_at",
-        ]
-
-
-class UserMembershipSerializer(serializers.ModelSerializer):
-    tier = serializers.PrimaryKeyRelatedField(queryset=Tier.objects.all())
-
-    class Meta:
-        model = User
-        fields = [
-            "tier",
-            "tier_expires_at",
-        ]
-
-
 class AuthorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Author
@@ -157,7 +117,6 @@ class GenreSummarySerializer(serializers.ModelSerializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
-    tier_detail = TierSummarySerializer(source="tier", read_only=True)
     password = serializers.CharField(
         write_only=True,
         required=False,
@@ -174,9 +133,6 @@ class UserSerializer(serializers.ModelSerializer):
             "last_name",
             "email",
             "rol",
-            "tier",
-            "tier_detail",
-            "tier_expires_at",
             "password",
             "is_active",
             "date_joined",
@@ -184,9 +140,6 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
-            "tier",
-            "tier_detail",
-            "tier_expires_at",
             "date_joined",
             "updated_at",
         ]
@@ -230,7 +183,6 @@ class UserSerializer(serializers.ModelSerializer):
 
 class UserSummarySerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
-    tier_detail = TierSummarySerializer(source="tier", read_only=True)
 
     class Meta:
         model = User
@@ -239,7 +191,6 @@ class UserSummarySerializer(serializers.ModelSerializer):
             "username",
             "full_name",
             "rol",
-            "tier_detail",
         ]
 
     def get_full_name(self, obj):
@@ -247,8 +198,6 @@ class UserSummarySerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    tier_detail = TierSummarySerializer(source="tier", read_only=True)
-
     class Meta:
         model = User
         fields = [
@@ -259,17 +208,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "rol",
-            "tier",
-            "tier_detail",
-            "tier_expires_at",
             "date_joined",
         ]
         read_only_fields = [
             "id",
             "rol",
-            "tier",
-            "tier_detail",
-            "tier_expires_at",
             "date_joined",
         ]
 
