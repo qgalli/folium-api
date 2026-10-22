@@ -54,18 +54,18 @@ class IsLibrarian(permissions.BasePermission):
 
 class IsLibrarianOrReadOnly(permissions.BasePermission):
         """
-        Permiso que permite lectura (GET, HEAD, OPTIONS) a cualquier usuario autenticado
-        (incluyendo lectores), pero restringe la creación, edición y eliminación
+        Permiso que permite lectura (GET, HEAD, OPTIONS) a cualquier visitante o usuario
+        (incluyendo invitados y lectores), pero restringe la creación, edición y eliminación
         exclusivamente a Bibliotecarios (LIBRARIAN) o Administradores (ADMIN).
         """
         def has_permission(self, request, view):
-                # 1. Verifica que el usuario haya iniciado sesión
-                if not (request.user and request.user.is_authenticated):
-                        return False
-
-                # 2. Si es una acción de solo lectura (catálogo), cualquier usuario autenticado puede acceder
+                # 1. Si es una acción de solo lectura (catálogo), cualquier visitante o usuario puede acceder
                 if request.method in permissions.SAFE_METHODS:
                         return True
+
+                # 2. Para acciones de escritura, verifica que el usuario haya iniciado sesión
+                if not (request.user and request.user.is_authenticated):
+                        return False
 
                 # 3. Acciones de escritura sólo permitidas para LIBRARIAN o ADMIN
                 return (
@@ -86,7 +86,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         """
         queryset = Item.objects.all()
         serializer_class = ItemSerializer
-        permission_classes = [IsLibrarianOrReadOnly]
+        permission_classes = [permissions.IsAuthenticated, IsLibrarianOrReadOnly]
 
 
 class LoanViewSet(viewsets.ModelViewSet):
@@ -96,7 +96,7 @@ class LoanViewSet(viewsets.ModelViewSet):
         - Lectores: solo lectura de sus propios préstamos.
         """
         serializer_class = LoanWriteSerializer
-        permission_classes = [IsLibrarianOrReadOnly]
+        permission_classes = [permissions.IsAuthenticated, IsLibrarianOrReadOnly]
 
         def get_queryset(self):
                 user = self.request.user
@@ -227,6 +227,17 @@ class ReservationViewSet(viewsets.ModelViewSet):
         def perform_create(self, serializer):
                 # Asigna automáticamente el usuario que hace la solicitud
                 serializer.save(user=self.request.user)
+
+        def perform_destroy(self, instance):
+                if instance.status == Reservation.StatusReservation.PENDING:
+                        reserved_item = Item.objects.filter(
+                                book=instance.book,
+                                status=Item.Status.RESERVED
+                        ).first()
+                        if reserved_item:
+                                reserved_item.status = Item.Status.AVAILABLE
+                                reserved_item.save()
+                instance.delete()
 
 
 class ReviewViewSet(viewsets.ModelViewSet):
