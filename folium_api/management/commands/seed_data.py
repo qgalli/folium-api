@@ -21,7 +21,7 @@ from django.core.files.images import ImageFile
 
 from django.core.management.base import CommandError
 
-from folium_api.models import Author, Genre, Book, Item, Loan, Reservation, Review
+from folium_api.models import Author, Genre, Book, Item, Loan, Reservation, Review, Editorial
 
 User = get_user_model()
 
@@ -315,6 +315,9 @@ class Command(BaseCommand):
     def _seed_books(self, authors, genres):
         books = []
         con_portada = 0
+        editorial, _ = Editorial.objects.get_or_create(
+            name="Editorial Planeta",
+        )
         for title, autores, genero_nombres, year, isbn, desc in LIBROS:
             book, created = Book.objects.get_or_create(
                 isbn=isbn,
@@ -322,6 +325,7 @@ class Command(BaseCommand):
                     "title": title,
                     "description": desc,
                     "publication_year": year,
+                    "editorial": editorial,
                 },
             )
             if created:

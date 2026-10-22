@@ -207,6 +207,78 @@ class UserSerializer(serializers.ModelSerializer):
         return instance
 
 
+class UserRegisterSerializer(serializers.ModelSerializer):
+    """
+    Serializador exclusivo para el autoregistro público de usuarios (Lector / Usuario).
+    - Fuerza el rol a USER (Usuario) independientemente de lo que envíe el cliente.
+    - Exige y encripta la contraseña de forma segura.
+    - Evita que campos privilegiados como is_staff o rol puedan ser manipulados.
+    """
+    password = serializers.CharField(
+        write_only=True,
+        required=True,
+        min_length=8,
+        error_messages={
+            "required": "La contraseña es obligatoria.",
+            "min_length": "La contraseña debe tener al menos 8 caracteres.",
+        },
+    )
+    rol = serializers.CharField(read_only=True, default=User.Rol.USER)
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "dni",
+            "first_name",
+            "last_name",
+            "email",
+            "password",
+            "rol",
+        ]
+        read_only_fields = [
+            "id",
+            "rol",
+        ]
+
+    def validate_username(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("El nombre de usuario no puede estar vacío.")
+        cleaned_value = str(value).strip()
+        if User.objects.filter(username__iexact=cleaned_value).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este nombre de usuario.")
+        return cleaned_value
+
+    def validate_email(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("El correo electrónico no puede estar vacío.")
+        cleaned_value = str(value).strip()
+        if User.objects.filter(email__iexact=cleaned_value).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este correo electrónico.")
+        return cleaned_value
+
+    def validate_dni(self, value):
+        if value is None:
+            raise serializers.ValidationError("El DNI es obligatorio.")
+        if value <= 0:
+            raise serializers.ValidationError("El DNI debe ser un número positivo.")
+        if User.objects.filter(dni=value).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este DNI.")
+        return value
+
+    def create(self, validated_data):
+        password = validated_data.pop("password")
+        # Aseguramos que siempre sea rol USER y sin privilegios de staff
+        validated_data["rol"] = User.Rol.USER
+        validated_data["is_staff"] = False
+        validated_data["is_superuser"] = False
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        return user
+
+
 class UserSummarySerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
 
@@ -452,7 +524,7 @@ class BookRecommendationSerializer(serializers.ModelSerializer):
     Serializador para endpoints de descubrimiento y recomendación (/random y /recommendation).
     Retorna los campos exactos requeridos: (id, title, year, cover, authors, rating).
     """
-    title = serializers.CharField(source="title", read_only=True)
+    title = serializers.CharField(read_only=True)
     year = serializers.IntegerField(source="publication_year", read_only=True)
     cover = serializers.SerializerMethodField()
     author = serializers.SerializerMethodField()

@@ -203,14 +203,11 @@ class FavoriteViewSet(viewsets.ModelViewSet):
 class ReaderRegistrationView(generics.CreateAPIView):
         """
         Controlador público para el autoregistro de lectores.
+        Solo permite el registro con rol USER.
         """
         queryset = User.objects.all()
-        serializer_class = UserSerializer
+        serializer_class = UserRegisterSerializer
         permission_classes = [permissions.AllowAny]
-
-        def perform_create(self, serializer):
-        # Asignamos explícitamente el rol USER al nuevo registrado
-                serializer.save(rol=User.Rol.USER)
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):

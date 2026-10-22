@@ -3,7 +3,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
-from .models import Author, Book, Editorial, Review
+from .models import Author, Book, Editorial, Review, Item
 
 User = get_user_model()
 
@@ -125,9 +125,34 @@ class UserDniTests(APITestCase):
 		self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
 		self.assertIn("dni", duplicate_response.data)
 
+	def test_reader_registration_forces_user_role(self):
+		response = self.client.post(
+			reverse("folium_api:reader-register"),
+			{
+				"username": "lector_prueba",
+				"dni": 48111222,
+				"email": "lector_prueba@example.com",
+				"password": "strongPassword123",
+				"first_name": "Lector",
+				"last_name": "Prueba",
+				"rol": "ADMIN",  # Intento de elevar privilegios o valor no estándar como "Usuario"
+			},
+			format="json",
+		)
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(response.data["rol"], User.Rol.USER)
+
+		user = User.objects.get(username="lector_prueba")
+		self.assertEqual(user.rol, User.Rol.USER)
+		self.assertFalse(user.is_staff)
+		self.assertFalse(user.is_superuser)
+		self.assertTrue(user.check_password("strongPassword123"))
+
 
 class RandomBookEndpointTests(APITestCase):
 	def setUp(self):
+		Item.objects.all().delete()
+		Book.objects.all().delete()
 		self.editorial = Editorial.objects.create(name="Editorial Sudamericana")
 		self.author = Author.objects.create(name="Gabriel", last_name="García Márquez")
 		self.book = Book.objects.create(
@@ -160,6 +185,7 @@ class RandomBookEndpointTests(APITestCase):
 		"""
 		Si el catálogo está vacío, debe responder con 404.
 		"""
+		Item.objects.all().delete()
 		Book.objects.all().delete()
 		response = self.client.get("/api/v1/random/")
 		self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -167,6 +193,8 @@ class RandomBookEndpointTests(APITestCase):
 
 class BookRecommendationEndpointTests(APITestCase):
 	def setUp(self):
+		Item.objects.all().delete()
+		Book.objects.all().delete()
 		self.editorial = Editorial.objects.create(name="Editorial Sur")
 		self.author = Author.objects.create(name="Jorge Luis", last_name="Borges")
 		self.user = User.objects.create_user(
