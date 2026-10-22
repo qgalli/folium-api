@@ -4,6 +4,7 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from django.db.models import Avg
 from .models import * # Importamos todos los modelos del archivo `models.py` (que está en este mismo directorio)
 
 # Crear serializadores acá
@@ -444,6 +445,46 @@ class BookDetailSerializer(serializers.ModelSerializer):
         ).count()
         return max(0, available - pending_reservations)
 
+
+
+class BookRecommendationSerializer(serializers.ModelSerializer):
+    """
+    Serializador para endpoints de descubrimiento y recomendación (/random y /recommendation).
+    Retorna los campos exactos requeridos: (id, titulo, año, nombre, tapa, autor)
+    y provee además compatibilidad con el frontend (title, year, cover, authors, rating).
+    """
+    title = serializers.CharField(source="title", read_only=True)
+    year = serializers.IntegerField(source="publication_year", read_only=True)
+    cover = serializers.SerializerMethodField()
+    author = AuthorSummarySerializer(many=True, read_only=True)
+    rating = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Book
+        fields = [
+            "id",
+            "title",
+            "year",
+            "cover",
+            "author",
+            "rating",
+        ]
+
+    def get_cover(self, obj):
+        if obj.cover_image:
+            request = self.context.get("request")
+            if request:
+                return request.build_absolute_uri(obj.cover_image.url)
+            return obj.cover_image.url
+        return None
+
+    def get_rating(self, obj):
+        avg = getattr(obj, "avg_rating", None)
+        if avg is not None:
+            return round(float(avg), 2)
+        active_reviews = obj.reviews.filter(deleted_at__isnull=True)
+        avg_aggregate = active_reviews.aggregate(avg=Avg("rating"))["avg"]
+        return round(float(avg_aggregate), 2) if avg_aggregate is not None else None
 
 
 # ==========================================

@@ -6,6 +6,8 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
+import random
+from django.db.models import Avg, Count, Q, F
 from .models import *
 from .serializers import *
 
@@ -133,6 +135,28 @@ class BookViewSet(viewsets.ModelViewSet):
                 elif self.action == 'retrieve':
                         return BookDetailSerializer
                 return BookWriteSerializer
+
+        @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny], url_path='random')
+        def random_book(self, request, *args, **kwargs):
+                """
+                Endpoint público de atajo para obtener un libro al azar dentro de /book/random/.
+                """
+                return RandomBookView.as_view()(request._request, *args, **kwargs)
+
+        @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny], url_path='recommendation')
+        def recommendation(self, request, *args, **kwargs):
+                """
+                Endpoint público de atajo para obtener los 10 mejores libros dentro de /book/recommendation/.
+                """
+                return BookRecommendationView.as_view()(request._request, *args, **kwargs)
+
+        @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny], url_path='recommendations')
+        def recommendations(self, request, *args, **kwargs):
+                """
+                Alias en plural para recomendaciones.
+                """
+                return BookRecommendationView.as_view()(request._request, *args, **kwargs)
+
 
 
 class AuthorViewSet(viewsets.ModelViewSet):
@@ -279,3 +303,84 @@ class ReviewViewSet(viewsets.ModelViewSet):
                 # Soft delete para reseñas
                 instance.deleted_at = timezone.now()
                 instance.save()
+
+
+# ==========================================
+# ENDPOINTS PÚBLICOS DE LIBROS (DISCOVERY / RECOMENDACIÓN)
+# ==========================================
+
+class RandomBookView(generics.GenericAPIView):
+        """
+        Endpoint público que devuelve un libro random (id, titulo, año, tapa, autor).
+        GET /api/v1/random/ (o /random/)
+        Precondición: No requiere inicio de sesión.
+        """
+        permission_classes = [permissions.AllowAny]
+        serializer_class = BookRecommendationSerializer
+
+        def get(self, request, *args, **kwargs):
+                book_ids = list(
+                        Book.objects.filter(deleted_at__isnull=True).values_list("id", flat=True)
+                )
+                if not book_ids:
+                        return Response(
+                                {"detail": "No se encontraron libros disponibles en el catálogo."},
+                                status=status.HTTP_404_NOT_FOUND,
+                        )
+
+                random_id = random.choice(book_ids)
+                book = (
+                        Book.objects.filter(id=random_id, deleted_at__isnull=True)
+                        .annotate(
+                                avg_rating=Avg(
+                                        "reviews__rating",
+                                        filter=Q(reviews__deleted_at__isnull=True),
+                                )
+                        )
+                        .prefetch_related("authors", "genres")
+                        .first()
+                )
+
+                if not book:
+                        return Response(
+                                {"detail": "El libro seleccionado no se encuentra disponible."},
+                                status=status.HTTP_404_NOT_FOUND,
+                        )
+
+                serializer = self.get_serializer(book)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class BookRecommendationView(generics.GenericAPIView):
+        """
+        Endpoint público que devuelve los 10 libros con mejor rating (id, titulo, año, tapa, autor).
+        GET /api/v1/recommendation/ (o /recommendation/)
+        Precondición: No requiere inicio de sesión.
+        """
+        permission_classes = [permissions.AllowAny]
+        serializer_class = BookRecommendationSerializer
+
+        def get(self, request, *args, **kwargs):
+                books = (
+                        Book.objects.filter(deleted_at__isnull=True)
+                        .annotate(
+                                avg_rating=Avg(
+                                        "reviews__rating",
+                                        filter=Q(reviews__deleted_at__isnull=True),
+                                ),
+                                review_count=Count(
+                                        "reviews",
+                                        filter=Q(reviews__deleted_at__isnull=True),
+                                ),
+                        )
+                        .order_by(
+                                F("avg_rating").desc(nulls_last=True),
+                                F("review_count").desc(),
+                                "-id",
+                        )
+                        .prefetch_related("authors", "genres")[:10]
+                )
+
+                serializer = self.get_serializer(books, many=True)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
