@@ -8,7 +8,11 @@ from django.urls import include, path
 from rest_framework_simplejwt.views import TokenRefreshView
 from django.conf import settings
 from django.conf.urls.static import static
-from folium_api.views import FoliumTokenObtainPairView
+from folium_api.views import (
+    FoliumTokenObtainPairView,
+    RandomBookView,
+    BookRecommendationView,
+)
 
 urlpatterns = [
     # Panel de administración de Django (http://localhost:8000/admin/)
@@ -23,6 +27,11 @@ urlpatterns = [
     # Autenticación JWT
     path('api/v1/token/', FoliumTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/v1/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+
+    # Rutas públicas directas a nivel raíz
+    path('random/', RandomBookView.as_view(), name='root-random'),
+    path('recommendation/', BookRecommendationView.as_view(), name='root-recommendation'),
+    path('recommendations/', BookRecommendationView.as_view(), name='root-recommendations'),
 ]
 
 # Sirve los archivos de /media (portadas, etc.) durante desarrollo.
