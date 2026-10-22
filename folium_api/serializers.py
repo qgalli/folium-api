@@ -438,7 +438,11 @@ class BookDetailSerializer(serializers.ModelSerializer):
         return obj.items.count()
 
     def get_available_items(self, obj):
-        return obj.items.filter(status=Item.Status.AVAILABLE).count()
+        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
+        pending_reservations = obj.reservations.filter(
+            status=Reservation.StatusReservation.PENDING
+        ).count()
+        return max(0, available - pending_reservations)
 
 
 
@@ -482,7 +486,7 @@ class LoanWriteSerializer(serializers.ModelSerializer):
                 active_loan = active_loan.exclude(pk=self.instance.pk)
             
             is_new_or_different_item = not self.instance or self.instance.item != item
-            if active_loan.exists() or (is_new_or_different_item and item.status not in [Item.Status.AVAILABLE, Item.Status.RESERVED]):
+            if active_loan.exists() or (is_new_or_different_item and item.status != Item.Status.AVAILABLE):
                 raise serializers.ValidationError({"item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."})
         
         return attrs
@@ -606,48 +610,7 @@ class ReservationSerializer(serializers.ModelSerializer):
                     "book": "Ya existe una reserva pendiente para este libro por parte del usuario."
                 })
 
-        # Regla 3: Al crear una reserva, debe haber al menos un ejemplar AVAILABLE para reservar
-        if not self.instance and status_val == Reservation.StatusReservation.PENDING and book:
-            has_available_item = Item.objects.filter(book=book, status=Item.Status.AVAILABLE).exists()
-            if not has_available_item:
-                raise serializers.ValidationError({
-                    "book": "No hay ejemplares disponibles de este libro para reservar."
-                })
-
         return attrs
-
-    def create(self, validated_data):
-        reservation = super().create(validated_data)
-        # Al crear la reserva PENDING, marcamos el primer ejemplar AVAILABLE como RESERVED
-        if reservation.status == Reservation.StatusReservation.PENDING:
-            item = Item.objects.filter(
-                book=reservation.book,
-                status=Item.Status.AVAILABLE
-            ).first()
-            if item:
-                item.status = Item.Status.RESERVED
-                item.save()
-        return reservation
-
-    def update(self, instance, validated_data):
-        old_status = instance.status
-        new_status = validated_data.get("status", old_status)
-        reservation = super().update(instance, validated_data)
-
-        # Si una reserva PENDING se cancela o expira, liberamos un ejemplar RESERVED a AVAILABLE
-        if old_status == Reservation.StatusReservation.PENDING and new_status in [
-            Reservation.StatusReservation.CANCELED,
-            Reservation.StatusReservation.EXPIRED,
-        ]:
-            reserved_item = Item.objects.filter(
-                book=reservation.book,
-                status=Item.Status.RESERVED
-            ).first()
-            if reserved_item:
-                reserved_item.status = Item.Status.AVAILABLE
-                reserved_item.save()
-
-        return reservation
 
 
 # ==========================================
