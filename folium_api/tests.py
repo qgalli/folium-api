@@ -3,6 +3,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
+from .models import Author, Book, Editorial, Review
 
 User = get_user_model()
 
@@ -127,11 +128,13 @@ class UserDniTests(APITestCase):
 
 class RandomBookEndpointTests(APITestCase):
 	def setUp(self):
+		self.editorial = Editorial.objects.create(name="Editorial Sudamericana")
 		self.author = Author.objects.create(name="Gabriel", last_name="García Márquez")
 		self.book = Book.objects.create(
 			title="Cien años de soledad",
 			publication_year=1967,
 			isbn="9780307474728",
+			editorial=self.editorial,
 		)
 		self.book.authors.add(self.author)
 
@@ -164,6 +167,7 @@ class RandomBookEndpointTests(APITestCase):
 
 class BookRecommendationEndpointTests(APITestCase):
 	def setUp(self):
+		self.editorial = Editorial.objects.create(name="Editorial Sur")
 		self.author = Author.objects.create(name="Jorge Luis", last_name="Borges")
 		self.user = User.objects.create_user(
 			username="reviewer1",
@@ -183,6 +187,7 @@ class BookRecommendationEndpointTests(APITestCase):
 			title="Ficciones",
 			publication_year=1944,
 			isbn="9788420633121",
+			editorial=self.editorial,
 		)
 		self.book_top.authors.add(self.author)
 
@@ -190,6 +195,7 @@ class BookRecommendationEndpointTests(APITestCase):
 			title="El Aleph",
 			publication_year=1949,
 			isbn="9788420633138",
+			editorial=self.editorial,
 		)
 		self.book_mid.authors.add(self.author)
 
@@ -197,6 +203,7 @@ class BookRecommendationEndpointTests(APITestCase):
 			title="El libro de arena",
 			publication_year=1975,
 			isbn="9788420633145",
+			editorial=self.editorial,
 		)
 		self.book_low.authors.add(self.author)
 

@@ -456,7 +456,7 @@ class BookRecommendationSerializer(serializers.ModelSerializer):
     title = serializers.CharField(source="title", read_only=True)
     year = serializers.IntegerField(source="publication_year", read_only=True)
     cover = serializers.SerializerMethodField()
-    author = AuthorSummarySerializer(many=True, read_only=True)
+    author = serializers.SerializerMethodField()
     rating = serializers.SerializerMethodField()
 
     class Meta:
@@ -477,6 +477,10 @@ class BookRecommendationSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.cover_image.url)
             return obj.cover_image.url
         return None
+
+    def get_author(self, obj):
+        authors = obj.authors.all()
+        return ", ".join(f"{a.name} {a.last_name}".strip() for a in authors) if authors.exists() else None
 
     def get_rating(self, obj):
         avg = getattr(obj, "avg_rating", None)
