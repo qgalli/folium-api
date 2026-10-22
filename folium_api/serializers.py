@@ -450,8 +450,7 @@ class BookDetailSerializer(serializers.ModelSerializer):
 class BookRecommendationSerializer(serializers.ModelSerializer):
     """
     Serializador para endpoints de descubrimiento y recomendación (/random y /recommendation).
-    Retorna los campos exactos requeridos: (id, titulo, año, nombre, tapa, autor)
-    y provee además compatibilidad con el frontend (title, year, cover, authors, rating).
+    Retorna los campos exactos requeridos: (id, title, year, cover, authors, rating).
     """
     title = serializers.CharField(source="title", read_only=True)
     year = serializers.IntegerField(source="publication_year", read_only=True)
