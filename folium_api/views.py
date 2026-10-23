@@ -135,6 +135,26 @@ class BookViewSet(viewsets.ModelViewSet):
         permission_classes = [IsLibrarianOrReadOnly]
         pagination_class = BookPagination
 
+        def get_queryset(self):
+                qs = Book.objects.all()
+
+                genre = self.request.query_params.get('genre')
+                year = self.request.query_params.get('year')
+                search = self.request.query_params.get('search')
+
+                if genre:
+                        qs = qs.filter(genres__name__icontains=genre)
+                if year:
+                        qs = qs.filter(publication_year=year)
+                if search:
+                        qs = qs.filter(
+                                Q(title__icontains=search) |
+                                Q(authors__name__icontains=search)
+                        )
+
+                # distinct() evita libros duplicados cuando hay múltiples autores/géneros
+                return qs.distinct()
+
         def get_serializer_class(self):
                 if self.action == 'list':
                         return BookListSerializer
