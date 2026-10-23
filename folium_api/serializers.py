@@ -521,24 +521,40 @@ class BookDetailSerializer(serializers.ModelSerializer):
 
 class BookRecommendationSerializer(serializers.ModelSerializer):
     """
-    Serializador para endpoints de descubrimiento y recomendación (/random y /recommendation).
-    Retorna los campos exactos requeridos: (id, title, year, cover, authors, rating).
+    Serializador para endpoints de descubrimiento y recomendación (/random y /recommendations).
+    Retorna los datos completos para tarjetas de recomendación y coverflow.
     """
     title = serializers.CharField(read_only=True)
     year = serializers.IntegerField(source="publication_year", read_only=True)
+    publication_year = serializers.IntegerField(read_only=True)
     cover = serializers.SerializerMethodField()
+    cover_image = serializers.SerializerMethodField()
     author = serializers.SerializerMethodField()
+    authors = AuthorSummarySerializer(many=True, read_only=True)
+    genres = GenreSummarySerializer(many=True, read_only=True)
+    category = serializers.SerializerMethodField()
     rating = serializers.SerializerMethodField()
+    total_items = serializers.SerializerMethodField()
+    available_items = serializers.SerializerMethodField()
 
     class Meta:
         model = Book
         fields = [
             "id",
             "title",
+            "isbn",
+            "description",
             "year",
+            "publication_year",
             "cover",
+            "cover_image",
             "author",
+            "authors",
+            "genres",
+            "category",
             "rating",
+            "total_items",
+            "available_items",
         ]
 
     def get_cover(self, obj):
@@ -549,9 +565,16 @@ class BookRecommendationSerializer(serializers.ModelSerializer):
             return obj.cover_image.url
         return None
 
+    def get_cover_image(self, obj):
+        return self.get_cover(obj)
+
     def get_author(self, obj):
         authors = obj.authors.all()
         return ", ".join(f"{a.name} {a.last_name}".strip() for a in authors) if authors.exists() else None
+
+    def get_category(self, obj):
+        first_genre = obj.genres.first()
+        return first_genre.name if first_genre else None
 
     def get_rating(self, obj):
         avg = getattr(obj, "avg_rating", None)
@@ -560,6 +583,16 @@ class BookRecommendationSerializer(serializers.ModelSerializer):
         active_reviews = obj.reviews.filter(deleted_at__isnull=True)
         avg_aggregate = active_reviews.aggregate(avg=Avg("rating"))["avg"]
         return round(float(avg_aggregate), 2) if avg_aggregate is not None else None
+
+    def get_total_items(self, obj):
+        return obj.items.count()
+
+    def get_available_items(self, obj):
+        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
+        pending_reservations = obj.reservations.filter(
+            status=Reservation.StatusReservation.PENDING
+        ).count()
+        return max(0, available - pending_reservations)
 
 
 # ==========================================

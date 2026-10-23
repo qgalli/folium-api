@@ -165,6 +165,7 @@ class BookViewSet(viewsets.ModelViewSet):
 
 
 
+
 class AuthorViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar autores.
@@ -381,9 +382,9 @@ class BookRecommendationView(generics.GenericAPIView):
                                 F("review_count").desc(),
                                 "-id",
                         )
-                        .prefetch_related("authors", "genres")[:10]
+                        .prefetch_related("authors", "genres", "items", "reservations")[:10]
                 )
 
-                serializer = self.get_serializer(books, many=True)
+                serializer = self.get_serializer(books, many=True, context={"request": request})
                 return Response(serializer.data, status=status.HTTP_200_OK)
 
