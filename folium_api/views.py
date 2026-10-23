@@ -1,7 +1,7 @@
 from django.views import View
 from django.http import HttpResponse
 from django.shortcuts import render
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, pagination
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import generics
@@ -120,6 +120,11 @@ class LoanViewSet(viewsets.ModelViewSet):
                 return LoanWriteSerializer
 
 
+class BookPagination(pagination.PageNumberPagination):
+        page_size = 20                       # Libros que devuelve por defecto
+        page_size_query_param = 'page_size' 
+        max_page_size = 50                  
+
 class BookViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar los libros (catálogo).
@@ -128,6 +133,7 @@ class BookViewSet(viewsets.ModelViewSet):
         queryset = Book.objects.all()
         serializer_class = BookWriteSerializer
         permission_classes = [IsLibrarianOrReadOnly]
+        pagination_class = BookPagination
 
         def get_serializer_class(self):
                 if self.action == 'list':
