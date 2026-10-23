@@ -43,6 +43,11 @@ urlpatterns = [
     # Perfil del usuario autenticado (Lector / Bibliotecario / Admin)
     path('me/', views.UserProfileView.as_view(), name='user-profile'),
 
+    # Endpoints públicos de libros (no requieren login)
+    path('random/', views.RandomBookView.as_view(), name='random-book'),
+    path('recommendation/', views.BookRecommendationView.as_view(), name='book-recommendation'),
+    path('recommendations/', views.BookRecommendationView.as_view(), name='book-recommendations'),
+
     # Incluye las rutas automáticas creadas por el router
     path('', include(router.urls)),
     

@@ -4,6 +4,7 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from django.db.models import Avg
 from .models import * # Importamos todos los modelos del archivo `models.py` (que está en este mismo directorio)
 
 # Crear serializadores acá
@@ -116,6 +117,31 @@ class GenreSummarySerializer(serializers.ModelSerializer):
         ]
 
 
+class EditorialSummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Editorial
+        fields = [
+            "id",
+            "name",
+        ]
+
+
+class EditorialSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Editorial
+        fields = [
+            "id",
+            "name",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+        ]
+
+
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
         write_only=True,
@@ -128,6 +154,7 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "username",
+            "dni",
             "first_name",
             "last_name",
             "email",
@@ -142,6 +169,18 @@ class UserSerializer(serializers.ModelSerializer):
             "date_joined",
             "updated_at",
         ]
+
+    def validate_dni(self, value):
+        if value is None:
+            raise serializers.ValidationError("El DNI es obligatorio.")
+        if value <= 0:
+            raise serializers.ValidationError("El DNI debe ser un número positivo.")
+        qs = User.objects.filter(dni=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este DNI.")
+        return value
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
@@ -168,6 +207,78 @@ class UserSerializer(serializers.ModelSerializer):
         return instance
 
 
+class UserRegisterSerializer(serializers.ModelSerializer):
+    """
+    Serializador exclusivo para el autoregistro público de usuarios (Lector / Usuario).
+    - Fuerza el rol a USER (Usuario) independientemente de lo que envíe el cliente.
+    - Exige y encripta la contraseña de forma segura.
+    - Evita que campos privilegiados como is_staff o rol puedan ser manipulados.
+    """
+    password = serializers.CharField(
+        write_only=True,
+        required=True,
+        min_length=8,
+        error_messages={
+            "required": "La contraseña es obligatoria.",
+            "min_length": "La contraseña debe tener al menos 8 caracteres.",
+        },
+    )
+    rol = serializers.CharField(read_only=True, default=User.Rol.USER)
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "dni",
+            "first_name",
+            "last_name",
+            "email",
+            "password",
+            "rol",
+        ]
+        read_only_fields = [
+            "id",
+            "rol",
+        ]
+
+    def validate_username(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("El nombre de usuario no puede estar vacío.")
+        cleaned_value = str(value).strip()
+        if User.objects.filter(username__iexact=cleaned_value).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este nombre de usuario.")
+        return cleaned_value
+
+    def validate_email(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("El correo electrónico no puede estar vacío.")
+        cleaned_value = str(value).strip()
+        if User.objects.filter(email__iexact=cleaned_value).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este correo electrónico.")
+        return cleaned_value
+
+    def validate_dni(self, value):
+        if value is None:
+            raise serializers.ValidationError("El DNI es obligatorio.")
+        if value <= 0:
+            raise serializers.ValidationError("El DNI debe ser un número positivo.")
+        if User.objects.filter(dni=value).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este DNI.")
+        return value
+
+    def create(self, validated_data):
+        password = validated_data.pop("password")
+        # Aseguramos que siempre sea rol USER y sin privilegios de staff
+        validated_data["rol"] = User.Rol.USER
+        validated_data["is_staff"] = False
+        validated_data["is_superuser"] = False
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        return user
+
+
 class UserSummarySerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
 
@@ -190,6 +301,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "username",
+            "dni",
             "email",
             "first_name",
             "last_name",
@@ -210,6 +322,16 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if User.objects.filter(username__iexact=cleaned_value).exclude(pk=user.pk).exists():
             raise serializers.ValidationError("Ya existe un usuario registrado con este nombre de usuario.")
         return cleaned_value
+
+    def validate_dni(self, value):
+        if value is None:
+            raise serializers.ValidationError("El DNI es obligatorio.")
+        if value <= 0:
+            raise serializers.ValidationError("El DNI debe ser un número positivo.")
+        user = self.instance
+        if User.objects.filter(dni=value).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError("Ya existe un usuario registrado con este DNI.")
+        return value
 
     def validate_email(self, value):
         if not value or not str(value).strip():
@@ -274,21 +396,29 @@ class ItemSummarySerializer(serializers.ModelSerializer):
 
 
 class BookSimpleSerializer(serializers.ModelSerializer):
+    editorial = EditorialSummarySerializer(read_only=True)
+
     class Meta:
         model = Book
         fields = [
             "id",
             "title",
+            "editorial",
             "cover_image",
         ]
 
 
 class BookWriteSerializer(serializers.ModelSerializer):
+    editorial = serializers.PrimaryKeyRelatedField(
+        queryset=Editorial.objects.all(),
+    )
+
     class Meta:
         model = Book
         fields = [
             "id",
             "title",
+            "editorial",
             "isbn",
             "description",
             "publication_year",
@@ -317,6 +447,7 @@ class BookWriteSerializer(serializers.ModelSerializer):
     
 
 class BookListSerializer(serializers.ModelSerializer):
+    editorial = EditorialSummarySerializer(read_only=True)
     authors = AuthorSummarySerializer(
         many=True,
         read_only=True,
@@ -332,6 +463,7 @@ class BookListSerializer(serializers.ModelSerializer):
             "id",
             "title",
             "isbn",
+            "editorial",
             "publication_year",
             "cover_image",
             "authors",
@@ -340,6 +472,7 @@ class BookListSerializer(serializers.ModelSerializer):
 
 
 class BookDetailSerializer(serializers.ModelSerializer):
+    editorial = EditorialSummarySerializer(read_only=True)
     authors = AuthorSerializer(
         many=True,
         read_only=True,
@@ -361,6 +494,7 @@ class BookDetailSerializer(serializers.ModelSerializer):
             "id",
             "title",
             "isbn",
+            "editorial",
             "description",
             "publication_year",
             "cover_image",
@@ -377,9 +511,88 @@ class BookDetailSerializer(serializers.ModelSerializer):
         return obj.items.count()
 
     def get_available_items(self, obj):
-        return obj.items.filter(
-            status=Item.Status.AVAILABLE
+        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
+        pending_reservations = obj.reservations.filter(
+            status=Reservation.StatusReservation.PENDING
         ).count()
+        return max(0, available - pending_reservations)
+
+
+
+class BookRecommendationSerializer(serializers.ModelSerializer):
+    """
+    Serializador para endpoints de descubrimiento y recomendación (/random y /recommendations).
+    Retorna los datos completos para tarjetas de recomendación y coverflow.
+    """
+    title = serializers.CharField(read_only=True)
+    year = serializers.IntegerField(source="publication_year", read_only=True)
+    publication_year = serializers.IntegerField(read_only=True)
+    cover = serializers.SerializerMethodField()
+    cover_image = serializers.SerializerMethodField()
+    author = serializers.SerializerMethodField()
+    authors = AuthorSummarySerializer(many=True, read_only=True)
+    genres = GenreSummarySerializer(many=True, read_only=True)
+    category = serializers.SerializerMethodField()
+    rating = serializers.SerializerMethodField()
+    total_items = serializers.SerializerMethodField()
+    available_items = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Book
+        fields = [
+            "id",
+            "title",
+            "isbn",
+            "description",
+            "year",
+            "publication_year",
+            "cover",
+            "cover_image",
+            "author",
+            "authors",
+            "genres",
+            "category",
+            "rating",
+            "total_items",
+            "available_items",
+        ]
+
+    def get_cover(self, obj):
+        if obj.cover_image:
+            request = self.context.get("request")
+            if request:
+                return request.build_absolute_uri(obj.cover_image.url)
+            return obj.cover_image.url
+        return None
+
+    def get_cover_image(self, obj):
+        return self.get_cover(obj)
+
+    def get_author(self, obj):
+        authors = obj.authors.all()
+        return ", ".join(f"{a.name} {a.last_name}".strip() for a in authors) if authors.exists() else None
+
+    def get_category(self, obj):
+        first_genre = obj.genres.first()
+        return first_genre.name if first_genre else None
+
+    def get_rating(self, obj):
+        avg = getattr(obj, "avg_rating", None)
+        if avg is not None:
+            return round(float(avg), 2)
+        active_reviews = obj.reviews.filter(deleted_at__isnull=True)
+        avg_aggregate = active_reviews.aggregate(avg=Avg("rating"))["avg"]
+        return round(float(avg_aggregate), 2) if avg_aggregate is not None else None
+
+    def get_total_items(self, obj):
+        return obj.items.count()
+
+    def get_available_items(self, obj):
+        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
+        pending_reservations = obj.reservations.filter(
+            status=Reservation.StatusReservation.PENDING
+        ).count()
+        return max(0, available - pending_reservations)
 
 
 # ==========================================
@@ -520,18 +733,19 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         request = self.context.get("request")
-        user = getattr(request, "user", None) if request else getattr(self.instance, "user", None)
+        user = getattr(self.instance, "user", None) if self.instance else getattr(request, "user", None)
         book = attrs.get("book", getattr(self.instance, "book", None))
         expires_at = attrs.get("expires_at", getattr(self.instance, "expires_at", None))
+        status_val = attrs.get("status", getattr(self.instance, "status", Reservation.StatusReservation.PENDING))
 
-        # Regla 1: La fecha de expiración debe ser en el futuro
-        if expires_at and expires_at <= timezone.now():
+        # Regla 1: La fecha de expiración debe ser en el futuro (al crear o modificar expires_at)
+        if (not self.instance or "expires_at" in attrs) and expires_at and expires_at <= timezone.now():
             raise serializers.ValidationError({
                 "expires_at": "La fecha de expiración debe ser en el futuro."
             })
 
         # Regla 2: Un usuario no puede tener dos reservas PENDING para el mismo libro
-        if user and user.is_authenticated and book:
+        if user and user.is_authenticated and book and status_val == Reservation.StatusReservation.PENDING:
             duplicate_qs = Reservation.objects.filter(
                 user=user,
                 book=book,

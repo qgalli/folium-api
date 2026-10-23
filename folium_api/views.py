@@ -1,11 +1,13 @@
 from django.views import View
 from django.http import HttpResponse
 from django.shortcuts import render
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, pagination
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
+import random
+from django.db.models import Avg, Count, Q, F
 from .models import *
 from .serializers import *
 
@@ -118,6 +120,11 @@ class LoanViewSet(viewsets.ModelViewSet):
                 return LoanWriteSerializer
 
 
+class BookPagination(pagination.PageNumberPagination):
+        page_size = 20                       # Libros que devuelve por defecto
+        page_size_query_param = 'page_size' 
+        max_page_size = 50                  
+
 class BookViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar los libros (catálogo).
@@ -126,6 +133,27 @@ class BookViewSet(viewsets.ModelViewSet):
         queryset = Book.objects.all()
         serializer_class = BookWriteSerializer
         permission_classes = [IsLibrarianOrReadOnly]
+        pagination_class = BookPagination
+
+        def get_queryset(self):
+                qs = Book.objects.all()
+
+                genre = self.request.query_params.get('genre')
+                year = self.request.query_params.get('year')
+                search = self.request.query_params.get('search')
+
+                if genre:
+                        qs = qs.filter(genres__name__icontains=genre)
+                if year:
+                        qs = qs.filter(publication_year=year)
+                if search:
+                        qs = qs.filter(
+                                Q(title__icontains=search) |
+                                Q(authors__name__icontains=search)
+                        )
+
+                # distinct() evita libros duplicados cuando hay múltiples autores/géneros
+                return qs.distinct()
 
         def get_serializer_class(self):
                 if self.action == 'list':
@@ -133,6 +161,29 @@ class BookViewSet(viewsets.ModelViewSet):
                 elif self.action == 'retrieve':
                         return BookDetailSerializer
                 return BookWriteSerializer
+
+        @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny], url_path='random')
+        def random_book(self, request, *args, **kwargs):
+                """
+                Endpoint público de atajo para obtener un libro al azar dentro de /book/random/.
+                """
+                return RandomBookView.as_view()(request._request, *args, **kwargs)
+
+        @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny], url_path='recommendation')
+        def recommendation(self, request, *args, **kwargs):
+                """
+                Endpoint público de atajo para obtener los 10 mejores libros dentro de /book/recommendation/.
+                """
+                return BookRecommendationView.as_view()(request._request, *args, **kwargs)
+
+        @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny], url_path='recommendations')
+        def recommendations(self, request, *args, **kwargs):
+                """
+                Alias en plural para recomendaciones.
+                """
+                return BookRecommendationView.as_view()(request._request, *args, **kwargs)
+
+
 
 
 class AuthorViewSet(viewsets.ModelViewSet):
@@ -179,14 +230,11 @@ class FavoriteViewSet(viewsets.ModelViewSet):
 class ReaderRegistrationView(generics.CreateAPIView):
         """
         Controlador público para el autoregistro de lectores.
+        Solo permite el registro con rol USER.
         """
         queryset = User.objects.all()
-        serializer_class = UserSerializer
+        serializer_class = UserRegisterSerializer
         permission_classes = [permissions.AllowAny]
-
-        def perform_create(self, serializer):
-        # Asignamos explícitamente el rol USER al nuevo registrado
-                serializer.save(rol=User.Rol.USER)
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):
@@ -203,14 +251,26 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
 class ReservationViewSet(viewsets.ModelViewSet):
         """
-        Controlador para que los lectores gestionen sus reservas.
+        Controlador para gestionar las reservas.
+        - Bibliotecarios/Admin: visualización y gestión de todas las reservas.
+        - Lectores: gestión únicamente de sus propias reservas.
         """
         serializer_class = ReservationSerializer
         permission_classes = [permissions.IsAuthenticated]
 
         def get_queryset(self):
+                user = self.request.user
+                # Bibliotecarios y administradores pueden ver y gestionar todas las reservas
+                if user.is_authenticated and (
+                        user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
+                        or user.is_staff
+                        or user.is_superuser
+                ):
+                        return Reservation.objects.all()
                 # Un lector solo ve sus propias reservas
-                return Reservation.objects.filter(user=self.request.user)
+                if user.is_authenticated:
+                        return Reservation.objects.filter(user=user)
+                return Reservation.objects.none()
 
         def perform_create(self, serializer):
                 # Asigna automáticamente el usuario que hace la solicitud
@@ -219,20 +279,34 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
 class ReviewViewSet(viewsets.ModelViewSet):
         """
-        Controlador para que los lectores gestionen y consulten reseñas.
+        Controlador para que los lectores gestionen y consulten reseñas,
+        y para que los bibliotecarios moderen (eliminen) comentarios ofensivos.
         - Filtrado por ?book=<id>: lista todas las reseñas activas de ese libro.
         - Sin filtro: lista únicamente las reseñas del usuario autenticado ("Mis reseñas").
-        - Modificaciones/Eliminaciones: solo permitidas al autor de la reseña.
+        - Modificaciones: solo permitidas al autor de la reseña.
+        - Eliminaciones: permitidas al autor o a bibliotecarios/administradores.
         """
         serializer_class = ReviewSerializer
         permission_classes = [permissions.IsAuthenticated]
 
         def get_queryset(self):
                 queryset = Review.objects.filter(deleted_at__isnull=True)
+                user = self.request.user
+                is_moderator = user.is_authenticated and (
+                        user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
+                        or user.is_staff
+                        or user.is_superuser
+                )
 
-                # Acciones de modificación o eliminación restringidas al autor
-                if self.action in ['update', 'partial_update', 'destroy']:
-                        return queryset.filter(user=self.request.user)
+                # Eliminación permitida a bibliotecarios/admin (moderación) o al propio autor
+                if self.action == 'destroy':
+                        if is_moderator:
+                                return queryset
+                        return queryset.filter(user=user)
+
+                # Modificación restringida únicamente al autor
+                if self.action in ['update', 'partial_update']:
+                        return queryset.filter(user=user)
 
                 # Si se filtra por libro, mostrar todas las reseñas comunitarias de ese libro
                 book_id = self.request.query_params.get('book')
@@ -242,7 +316,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
                         return Review.objects.none()
 
                 # Sin filtro de libro: muestra las reseñas del propio usuario autenticado ("Mis reseñas")
-                return queryset.filter(user=self.request.user)
+                return queryset.filter(user=user)
 
         def perform_create(self, serializer):
                 # Asigna automáticamente el usuario que hace la solicitud
@@ -253,3 +327,84 @@ class ReviewViewSet(viewsets.ModelViewSet):
                 # Soft delete para reseñas
                 instance.deleted_at = timezone.now()
                 instance.save()
+
+
+# ==========================================
+# ENDPOINTS PÚBLICOS DE LIBROS (DISCOVERY / RECOMENDACIÓN)
+# ==========================================
+
+class RandomBookView(generics.GenericAPIView):
+        """
+        Endpoint público que devuelve un libro random (id, titulo, año, tapa, autor).
+        GET /api/v1/random/ (o /random/)
+        Precondición: No requiere inicio de sesión.
+        """
+        permission_classes = [permissions.AllowAny]
+        serializer_class = BookRecommendationSerializer
+
+        def get(self, request, *args, **kwargs):
+                book_ids = list(
+                        Book.objects.filter(deleted_at__isnull=True).values_list("id", flat=True)
+                )
+                if not book_ids:
+                        return Response(
+                                {"detail": "No se encontraron libros disponibles en el catálogo."},
+                                status=status.HTTP_404_NOT_FOUND,
+                        )
+
+                random_id = random.choice(book_ids)
+                book = (
+                        Book.objects.filter(id=random_id, deleted_at__isnull=True)
+                        .annotate(
+                                avg_rating=Avg(
+                                        "reviews__rating",
+                                        filter=Q(reviews__deleted_at__isnull=True),
+                                )
+                        )
+                        .prefetch_related("authors", "genres")
+                        .first()
+                )
+
+                if not book:
+                        return Response(
+                                {"detail": "El libro seleccionado no se encuentra disponible."},
+                                status=status.HTTP_404_NOT_FOUND,
+                        )
+
+                serializer = self.get_serializer(book)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class BookRecommendationView(generics.GenericAPIView):
+        """
+        Endpoint público que devuelve los 10 libros con mejor rating (id, titulo, año, tapa, autor).
+        GET /api/v1/recommendation/ (o /recommendation/)
+        Precondición: No requiere inicio de sesión.
+        """
+        permission_classes = [permissions.AllowAny]
+        serializer_class = BookRecommendationSerializer
+
+        def get(self, request, *args, **kwargs):
+                books = (
+                        Book.objects.filter(deleted_at__isnull=True)
+                        .annotate(
+                                avg_rating=Avg(
+                                        "reviews__rating",
+                                        filter=Q(reviews__deleted_at__isnull=True),
+                                ),
+                                review_count=Count(
+                                        "reviews",
+                                        filter=Q(reviews__deleted_at__isnull=True),
+                                ),
+                        )
+                        .order_by(
+                                F("avg_rating").desc(nulls_last=True),
+                                F("review_count").desc(),
+                                "-id",
+                        )
+                        .prefetch_related("authors", "genres", "items", "reservations")[:10]
+                )
+
+                serializer = self.get_serializer(books, many=True, context={"request": request})
+                return Response(serializer.data, status=status.HTTP_200_OK)
+

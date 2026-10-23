@@ -38,6 +38,14 @@ class Genre(models.Model):
     def __str__(self):
         return self.name
 
+class Editorial(models.Model):
+    name = models.CharField(max_length=150, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
 class Book(models.Model):
     authors = models.ManyToManyField(
         Author, 
@@ -50,6 +58,11 @@ class Book(models.Model):
     )
     
     title = models.CharField(max_length=45)
+    editorial = models.ForeignKey(
+        Editorial,
+        on_delete=models.PROTECT,
+        related_name="books",
+    )
     isbn = models.CharField(max_length=13, unique=True)
     description = models.TextField(blank=True)
     publication_year = models.IntegerField(null=True, blank=True)
@@ -142,6 +155,7 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
 
     # Campos propios del proyecto
+    dni = models.IntegerField(unique=True)
     rol = models.CharField(max_length=20, choices=Rol.choices, default=Rol.USER)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -167,6 +181,10 @@ class User(AbstractUser):
         # Regla 3: La fecha de eliminación (soft-delete) no puede ser en el futuro
         if self.deleted_at and self.deleted_at > timezone.now():
             errors['deleted_at'] = 'La fecha de eliminación no puede ser en el futuro.'
+
+        # Regla 4: El DNI debe ser un número positivo
+        if self.dni is not None and self.dni <= 0:
+            errors['dni'] = 'El DNI debe ser un número positivo.'
 
         if errors:
             raise ValidationError(errors)

@@ -21,7 +21,7 @@ from django.core.files.images import ImageFile
 
 from django.core.management.base import CommandError
 
-from folium_api.models import Author, Genre, Book, Item, Loan, Reservation, Review
+from folium_api.models import Author, Genre, Book, Item, Loan, Reservation, Review, Editorial
 
 User = get_user_model()
 
@@ -315,6 +315,9 @@ class Command(BaseCommand):
     def _seed_books(self, authors, genres):
         books = []
         con_portada = 0
+        editorial, _ = Editorial.objects.get_or_create(
+            name="Editorial Planeta",
+        )
         for title, autores, genero_nombres, year, isbn, desc in LIBROS:
             book, created = Book.objects.get_or_create(
                 isbn=isbn,
@@ -322,6 +325,7 @@ class Command(BaseCommand):
                     "title": title,
                     "description": desc,
                     "publication_year": year,
+                    "editorial": editorial,
                 },
             )
             if created:
@@ -376,6 +380,7 @@ class Command(BaseCommand):
         admin, created = User.objects.get_or_create(
             username="admin",
             defaults={
+                "dni": 10000001,
                 "email": "admin@folium.com",
                 "first_name": "Admin",
                 "last_name": "Sistema",
@@ -390,13 +395,14 @@ class Command(BaseCommand):
         users["admin"] = admin
 
         bibliotecarios_data = [
-            ("mfernandez", "María", "Fernández", "maria.fernandez@folium.com"),
-            ("jperalta", "Juan", "Peralta", "juan.peralta@folium.com"),
+            ("mfernandez", "María", "Fernández", "maria.fernandez@folium.com", 20000001),
+            ("jperalta", "Juan", "Peralta", "juan.peralta@folium.com", 20000002),
         ]
-        for username, first, last, email in bibliotecarios_data:
+        for username, first, last, email, dni in bibliotecarios_data:
             user, created = User.objects.get_or_create(
                 username=username,
                 defaults={
+                    "dni": dni,
                     "email": email,
                     "first_name": first,
                     "last_name": last,
@@ -410,13 +416,14 @@ class Command(BaseCommand):
             users["librarians"].append(user)
 
         lectores_data = [
-            ("mgomez", "Martina", "Gómez", "martina.gomez@correo.com"),
-            ("lrodriguez", "Lucas", "Rodríguez", "lucas.rodriguez@correo.com"),
+            ("mgomez", "Martina", "Gómez", "martina.gomez@correo.com", 30000001),
+            ("lrodriguez", "Lucas", "Rodríguez", "lucas.rodriguez@correo.com", 30000002),
         ]
-        for username, first, last, email in lectores_data:
+        for username, first, last, email, dni in lectores_data:
             user, created = User.objects.get_or_create(
                 username=username,
                 defaults={
+                    "dni": dni,
                     "email": email,
                     "first_name": first,
                     "last_name": last,
@@ -436,6 +443,7 @@ class Command(BaseCommand):
             user, created = User.objects.get_or_create(
                 username=username,
                 defaults={
+                    "dni": 30000000 + i,
                     "email": f"{username}@correo.com",
                     "first_name": first,
                     "last_name": last,

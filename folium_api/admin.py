@@ -6,7 +6,7 @@ from .models import *
 class CustomUserCreationForm(UserCreationForm):
     class Meta(UserCreationForm.Meta):
         model = User
-        fields = ('username', 'email', 'first_name', 'last_name', 'rol', 'is_staff')
+        fields = ('username', 'dni', 'email', 'first_name', 'last_name', 'rol', 'is_staff')
 
 @admin.register(Author)
 class AuthorAdmin(admin.ModelAdmin):
@@ -40,14 +40,14 @@ class ItemAdmin(admin.ModelAdmin):
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     add_form = CustomUserCreationForm
-    list_display = ('first_name', 'last_name', 'email', 'rol')
+    list_display = ('first_name', 'last_name', 'dni', 'email', 'rol')
     list_filter = ('rol',)
-    search_fields = ('first_name', 'last_name', 'email')
+    search_fields = ('first_name', 'last_name', 'email', 'dni')
     ordering = ('username',)
     # Pantalla de edición de un usuario existente
     fieldsets = (
         ('Credentials', {'fields': ('username', 'password')}),
-        ('Personal Information', {'fields': ('first_name', 'last_name', 'email', 'rol')}),
+        ('Personal Information', {'fields': ('first_name', 'last_name', 'dni', 'email', 'rol')}),
         ('Access Permissions', {
             'fields': ('is_active', 'is_staff', 'is_superuser'),
             'description': 'Nota: Un LIBRARIAN requiere tener "is_staff" tildado para poder ingresar a este panel.'
@@ -58,7 +58,7 @@ class UserAdmin(BaseUserAdmin):
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('username', 'email', 'first_name', 'last_name', 'rol', 'is_staff', 'password1', 'password2'),
+            'fields': ('username', 'dni', 'email', 'first_name', 'last_name', 'rol', 'is_staff', 'password1', 'password2'),
         }),
     )
 
