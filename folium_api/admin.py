@@ -32,7 +32,7 @@ class BookAdmin(admin.ModelAdmin):
 
 @admin.register(Item)
 class ItemAdmin(admin.ModelAdmin):
-    list_display = ('inventory_code', 'book', 'status', 'location')
+    list_display = ('id', 'inventory_code', 'book', 'status', 'location')
     list_filter = ('status', 'location')
     search_fields = ('inventory_code', 'book__title')
     autocomplete_fields = ('book',) 
