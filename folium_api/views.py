@@ -343,9 +343,14 @@ class RandomBookView(generics.GenericAPIView):
         serializer_class = BookRecommendationSerializer
 
         def get(self, request, *args, **kwargs):
-                book_ids = list(
-                        Book.objects.filter(deleted_at__isnull=True).values_list("id", flat=True)
-                )
+                qs = Book.objects.filter(deleted_at__isnull=True)
+                genre = request.query_params.get("genre")
+                if genre:
+                        genre_qs = qs.filter(genres__name__icontains=genre)
+                        if genre_qs.exists():
+                                qs = genre_qs
+
+                book_ids = list(qs.values_list("id", flat=True).distinct())
                 if not book_ids:
                         return Response(
                                 {"detail": "No se encontraron libros disponibles en el catálogo."},

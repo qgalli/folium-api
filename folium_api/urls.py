@@ -48,6 +48,12 @@ urlpatterns = [
     path('recommendation/', views.BookRecommendationView.as_view(), name='book-recommendation'),
     path('recommendations/', views.BookRecommendationView.as_view(), name='book-recommendations'),
 
+    # Módulo de importador masivo de catálogos (Fase 1: Excel / CSV)
+    path('importer/', include('folium_api.importer_urls')),
+
+    # Módulo de planes institucionales y pasarela de pago MercadoPago
+    path('billing/', include('folium_api.billing_urls')),
+
     # Incluye las rutas automáticas creadas por el router
     path('', include(router.urls)),
     
