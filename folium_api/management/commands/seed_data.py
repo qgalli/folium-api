@@ -340,6 +340,16 @@ class Command(BaseCommand):
                         # armar ese path a mano.
                         book.cover_image.save(cover_path.name, ImageFile(f), save=True)
                     con_portada += 1
+            else:
+                # Si el libro ya existía pero no tenía portada asignada
+                if not book.cover_image:
+                    cover_path = _find_cover_file(isbn)
+                    if cover_path:
+                        with open(cover_path, "rb") as f:
+                            book.cover_image.save(cover_path.name, ImageFile(f), save=True)
+                        con_portada += 1
+                else:
+                    con_portada += 1
             books.append(book)
         self.stdout.write(
             self.style.SUCCESS(f"Libros: {len(books)} (con portada: {con_portada})")
