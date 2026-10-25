@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import random
 import re
 import zipfile
 import xml.etree.ElementTree as ET
@@ -157,8 +158,8 @@ def auto_suggest_mapping(headers):
         "year": ["año", "ano", "year", "publicacion", "fecha", "edicion", "date"],
         "genre": ["genero", "género", "genre", "categoria", "categoría", "materia", "tema", "subject"],
         "inventory_code": ["codigo", "código", "codigo de inventario", "inventario", "sig", "item", "ejemplar"],
-        "location": ["ubicacion", "ubicación", "estante", "location", "sector", "sala", "posicion"],
-        "description": ["descripcion", "descripción", "description", "sinopsis", "resumen", "nota"],
+        "location": ["ubicacion", "ubicación", "estante", "location", "sector", "sala", "posicion", "dónde está", "donde esta"],
+        "description": ["descripcion", "descripción", "description", "sinopsis", "resumen", "nota", "info"],
     }
 
     mapping = {}
@@ -277,21 +278,20 @@ class CatalogImporterSimulateView(APIView):
             author_val = _clean_str(row.get(author_col, ""))
             isbn_val = _clean_isbn(row.get(isbn_col, "")) if isbn_col else None
 
+            # Descartar filas completamente vacías o fantasma (ej. filas con fórmulas al final del Excel)
+            if not title_val and not author_val:
+                continue
+
             if not title_val:
                 errors.append({
                     "row": idx,
-                    "reason": "La fila no tiene título especificado.",
+                    "reason": "La fila contiene datos pero no tiene título especificado.",
                     "data": row,
                 })
                 continue
 
             if not author_val:
-                errors.append({
-                    "row": idx,
-                    "reason": f'El libro "{title_val[:30]}" no tiene autor especificado.',
-                    "data": row,
-                })
-                continue
+                author_val = "Autor no especificado"
 
             valid_rows += 1
 
@@ -391,9 +391,16 @@ class CatalogImporterExecuteView(APIView):
                 title_val = _clean_str(row.get(title_col, ""))
                 author_val = _clean_str(row.get(author_col, ""))
 
-                if not title_val or not author_val:
+                # Descartar filas completamente vacías o fantasma
+                if not title_val and not author_val:
+                    continue
+
+                if not title_val:
                     skipped_count += 1
                     continue
+
+                if not author_val:
+                    author_val = "Autor no especificado"
 
                 # 1. Editorial
                 ed_name = _clean_str(row.get(editorial_col, "")) if editorial_col else ""
@@ -420,12 +427,11 @@ class CatalogImporterExecuteView(APIView):
                 # Si el libro no existe, lo creamos
                 if not book_obj:
                     if not isbn_val:
-                        # Genera un pseudo-ISBN válido de 13 dígitos numéricos único: 999XXXXXXXXXX
-                        pseudo = f"999{base_timestamp % 100000000:08d}{synthetic_counter:02d}"
-                        synthetic_counter += 1
-                        while Book.objects.filter(isbn=pseudo).exists():
-                            synthetic_counter += 1
-                            pseudo = f"999{base_timestamp % 100000000:08d}{synthetic_counter:02d}"
+                        # Genera un pseudo-ISBN único garantizando exactamente 13 dígitos numéricos:
+                        while True:
+                            pseudo = f"999{random.randint(1000000000, 9999999999)}"
+                            if not Book.objects.filter(isbn=pseudo).exists():
+                                break
                         isbn_val = pseudo
 
                     # Año de publicación
