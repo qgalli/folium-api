@@ -311,7 +311,7 @@ class CatalogImporterSimulateView(APIView):
                     "row": idx,
                     "title": title_val[:45],
                     "author": author_val,
-                    "isbn": isbn_val or "Se generará automático",
+                    "isbn": isbn_val or "Sin ISBN",
                     "status_simulated": "Existente (añadirá copia)" if is_existing else "Nuevo libro",
                 })
 
@@ -426,15 +426,7 @@ class CatalogImporterExecuteView(APIView):
 
                 # Si el libro no existe, lo creamos
                 if not book_obj:
-                    if not isbn_val:
-                        # Genera un pseudo-ISBN único garantizando exactamente 13 dígitos numéricos:
-                        while True:
-                            pseudo = f"999{random.randint(1000000000, 9999999999)}"
-                            if not Book.objects.filter(isbn=pseudo).exists():
-                                break
-                        isbn_val = pseudo
-
-                    # Año de publicación
+                    # Año de publicación (el ISBN queda None si no está presente en el archivo)
                     year_val = None
                     if year_col and row.get(year_col):
                         match_year = re.search(r"\b(1\d{3}|20\d{2})\b", _clean_str(row[year_col]))
