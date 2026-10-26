@@ -133,16 +133,222 @@ def parse_xlsx_file(file_bytes):
         raise ValueError(f"No se pudo procesar el archivo Excel: {str(e)}")
 
 
+def clean_bibtex_value(val):
+    if not val:
+        return ""
+    val = str(val).strip()
+    if (val.startswith("{") and val.endswith("}")) or (val.startswith('"') and val.endswith('"')):
+        val = val[1:-1].strip()
+
+    # Normalizar dotless i de LaTeX
+    val = val.replace(r"{\i}", "i").replace(r"\i", "i")
+
+    # Reemplazo de acentos y caracteres especiales comunes en BibTeX / LaTeX
+    accents = {
+        "'": {"a": "á", "e": "é", "i": "í", "o": "ó", "u": "ú", "A": "Á", "E": "É", "I": "Í", "O": "Ó", "U": "Ú"},
+        "`": {"a": "à", "e": "è", "i": "ì", "o": "ò", "u": "ù", "A": "À", "E": "È", "I": "Ì", "O": "Ò", "U": "Ù"},
+        "^": {"a": "â", "e": "ê", "i": "î", "o": "ô", "u": "û", "A": "Â", "E": "Ê", "I": "Î", "O": "Ô", "U": "Û"},
+        '"': {"a": "ä", "e": "ë", "i": "ï", "o": "ö", "u": "ü", "A": "Ä", "E": "Ë", "I": "Ï", "O": "Ö", "U": "Ü"},
+        "~": {"a": "ã", "n": "ñ", "o": "õ", "A": "Ã", "N": "Ñ", "O": "Õ"},
+        "c": {"c": "ç", "C": "Ç"},
+    }
+    for acc, mapping in accents.items():
+        for char, repl in mapping.items():
+            val = val.replace("{\\" + acc + "{" + char + "}}", repl)
+            val = val.replace("{\\" + acc + char + "}", repl)
+            val = val.replace("\\" + acc + "{" + char + "}", repl)
+            val = val.replace("\\" + acc + char, repl)
+
+    # Remover llaves restantes usadas para proteger mayúsculas (ej. {LaTeX} o {NASA})
+    while "{" in val and "}" in val:
+        new_val = re.sub(r"\{([^{}]*)\}", r"\1", val)
+        if new_val == val:
+            break
+        val = new_val
+    val = val.replace("{", "").replace("}", "")
+    val = val.replace("--", "-").replace("---", "—")
+    val = re.sub(r"\s+", " ", val).strip()
+    return val
+
+
+def format_bibtex_authors(author_str):
+    if not author_str:
+        return ""
+    # En BibTeX los autores múltiples vienen separados por ' and '
+    authors = re.split(r"\s+and\s+", str(author_str), flags=re.IGNORECASE)
+    formatted = []
+    for a in authors:
+        a = clean_bibtex_value(a)
+        if not a:
+            continue
+        if "," in a:
+            # Formato "Apellido, Nombre" -> "Nombre Apellido"
+            parts = a.split(",", 1)
+            formatted.append(f"{parts[1].strip()} {parts[0].strip()}".strip())
+        else:
+            formatted.append(a)
+    return ", ".join(formatted)
+
+
+def parse_bib_file(file_bytes):
+    """
+    Parser nativo de archivos BibTeX (.bib) utilizando la biblioteca estándar de Python.
+    Extrae cada entrada (@book, @article, etc.) como una fila con sus atributos normalizados.
+    """
+    for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
+        try:
+            text = file_bytes.decode(enc)
+            break
+        except (UnicodeDecodeError, AttributeError):
+            continue
+    else:
+        text = file_bytes.decode("utf-8", errors="replace")
+
+    # Expresión para identificar el inicio de cada entrada @tipo{clave,
+    entry_pattern = re.compile(r"@([a-zA-Z]+)\s*\{\s*([^,\s\}]+)\s*,", re.UNICODE)
+
+    rows = []
+    headers_set = set(["title", "author"])
+    pos = 0
+
+    while True:
+        match = entry_pattern.search(text, pos)
+        if not match:
+            break
+
+        entry_type = match.group(1).lower()
+        citation_key = match.group(2).strip()
+
+        # Omitir entradas que no representen documentos (comentarios, macros, preámbulos)
+        if entry_type in ("comment", "string", "preamble"):
+            pos = match.end()
+            continue
+
+        entry_start = match.end()
+        brace_depth = 1
+        i = entry_start
+        in_quotes = False
+        entry_body = ""
+
+        # Encontrar el delimitador de cierre respetando anidación de llaves y comillas
+        while i < len(text) and brace_depth > 0:
+            ch = text[i]
+            if ch == '"' and text[i - 1:i] != "\\":
+                in_quotes = not in_quotes
+            elif not in_quotes:
+                if ch == "{":
+                    brace_depth += 1
+                elif ch == "}":
+                    brace_depth -= 1
+                    if brace_depth == 0:
+                        entry_body = text[entry_start:i]
+                        break
+            i += 1
+
+        pos = i + 1
+
+        row = {
+            "entry_type": entry_type,
+            "citation_key": citation_key,
+        }
+        headers_set.add("entry_type")
+        headers_set.add("citation_key")
+
+        # Parsear los campos clave = valor dentro del cuerpo de la entrada
+        body_idx = 0
+        while body_idx < len(entry_body):
+            eq_idx = entry_body.find("=", body_idx)
+            if eq_idx == -1:
+                break
+
+            field_name = entry_body[body_idx:eq_idx].strip()
+            field_name = field_name.lstrip(", \t\r\n").strip().lower()
+
+            val_start = eq_idx + 1
+            while val_start < len(entry_body) and entry_body[val_start] in " \t\r\n":
+                val_start += 1
+
+            if val_start >= len(entry_body):
+                break
+
+            val_first_char = entry_body[val_start]
+            val_end = val_start
+
+            if val_first_char == "{":
+                depth = 0
+                for vi in range(val_start, len(entry_body)):
+                    if entry_body[vi] == "{":
+                        depth += 1
+                    elif entry_body[vi] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            val_end = vi + 1
+                            break
+                raw_val = entry_body[val_start:val_end]
+                body_idx = val_end
+            elif val_first_char == '"':
+                vi = val_start + 1
+                while vi < len(entry_body):
+                    if entry_body[vi] == '"' and entry_body[vi - 1:vi] != "\\":
+                        val_end = vi + 1
+                        break
+                    vi += 1
+                raw_val = entry_body[val_start:val_end]
+                body_idx = val_end
+            else:
+                # Valor no delimitado (ej. números en 'year = 1999,')
+                comma_idx = entry_body.find(",", val_start)
+                if comma_idx == -1:
+                    raw_val = entry_body[val_start:].strip()
+                    body_idx = len(entry_body)
+                else:
+                    raw_val = entry_body[val_start:comma_idx].strip()
+                    body_idx = comma_idx + 1
+
+            if field_name:
+                cleaned_field = clean_bibtex_value(raw_val)
+                if field_name == "author":
+                    cleaned_field = format_bibtex_authors(raw_val)
+                row[field_name] = cleaned_field
+                headers_set.add(field_name)
+
+        if row.get("title") or row.get("author"):
+            rows.append(row)
+
+    # Ordenar cabeceras priorizando las columnas principales para el catálogo
+    priority_headers = ["title", "author", "isbn", "publisher", "year", "keywords", "abstract", "entry_type", "citation_key"]
+    sorted_headers = [h for h in priority_headers if h in headers_set]
+    sorted_headers += sorted([h for h in headers_set if h not in priority_headers])
+
+    return sorted_headers, rows
+
+
 def parse_uploaded_file(uploaded_file):
     name = (uploaded_file.name or "").lower()
     file_bytes = uploaded_file.read()
 
     if name.endswith(".xlsx"):
         return parse_xlsx_file(file_bytes)
+    elif name.endswith(".bib"):
+        return parse_bib_file(file_bytes)
     elif name.endswith((".csv", ".tsv", ".txt")):
+        # Verificar si un archivo .txt es en realidad BibTeX
+        sample_head = file_bytes[:1024].decode("utf-8", errors="ignore")
+        if re.search(r"@([a-zA-Z]+)\s*\{\s*([^,\s\}]+)\s*,", sample_head):
+            try:
+                return parse_bib_file(file_bytes)
+            except Exception:
+                pass
         return parse_csv_file(file_bytes)
     else:
-        # Intenta primero como CSV
+        # Detección inteligente por contenido
+        sample_head = file_bytes[:1024].decode("utf-8", errors="ignore")
+        if re.search(r"@([a-zA-Z]+)\s*\{\s*([^,\s\}]+)\s*,", sample_head):
+            try:
+                return parse_bib_file(file_bytes)
+            except Exception:
+                pass
+
         try:
             return parse_csv_file(file_bytes)
         except Exception:
@@ -151,15 +357,15 @@ def parse_uploaded_file(uploaded_file):
 
 def auto_suggest_mapping(headers):
     synonyms = {
-        "title": ["título", "titulo", "title", "nombre", "obra", "libro", "denominacion"],
-        "author": ["autor", "autores", "author", "authors", "escritor", "creador"],
-        "isbn": ["isbn", "isbn-10", "isbn-13", "isbn10", "isbn13", "codigo de barra", "barcode"],
-        "editorial": ["editorial", "editor", "publisher", "sello", "publicador"],
+        "title": ["título", "titulo", "title", "nombre", "obra", "libro", "denominacion", "booktitle"],
+        "author": ["autor", "autores", "author", "authors", "escritor", "creador", "editor"],
+        "isbn": ["isbn", "isbn-10", "isbn-13", "isbn10", "isbn13", "issn", "codigo de barra", "barcode"],
+        "editorial": ["editorial", "editor", "publisher", "sello", "publicador", "institution", "organization"],
         "year": ["año", "ano", "year", "publicacion", "fecha", "edicion", "date"],
-        "genre": ["genero", "género", "genre", "categoria", "categoría", "materia", "tema", "subject"],
-        "inventory_code": ["codigo", "código", "codigo de inventario", "inventario", "sig", "item", "ejemplar"],
-        "location": ["ubicacion", "ubicación", "estante", "location", "sector", "sala", "posicion", "dónde está", "donde esta"],
-        "description": ["descripcion", "descripción", "description", "sinopsis", "resumen", "nota", "info"],
+        "genre": ["genero", "género", "genre", "categoria", "categoría", "materia", "tema", "subject", "keywords", "keyword"],
+        "inventory_code": ["codigo", "código", "codigo de inventario", "inventario", "sig", "item", "ejemplar", "citation_key"],
+        "location": ["ubicacion", "ubicación", "estante", "location", "sector", "sala", "posicion", "dónde está", "donde esta", "address"],
+        "description": ["descripcion", "descripción", "description", "sinopsis", "resumen", "nota", "info", "abstract", "note", "annote"],
     }
 
     mapping = {}
