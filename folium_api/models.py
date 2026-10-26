@@ -63,7 +63,7 @@ class Book(models.Model):
         on_delete=models.PROTECT,
         related_name="books",
     )
-    isbn = models.CharField(max_length=13, unique=True)
+    isbn = models.CharField(max_length=13, unique=True, null=True, blank=True)
     description = models.TextField(blank=True)
     publication_year = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -74,11 +74,15 @@ class Book(models.Model):
     def clean(self):
         errors = {}
 
-        # Regla 1: El ISBN debe tener exactamente 10 o 13 dígitos numéricos
+        # Regla 1: El ISBN debe tener exactamente 10 o 13 dígitos numéricos si está especificado
         if self.isbn:
             isbn_digits = self.isbn.replace('-', '').replace(' ', '')
             if not isbn_digits.isdigit() or len(isbn_digits) not in (10, 13):
                 errors['isbn'] = 'El ISBN debe contener exactamente 10 o 13 dígitos numéricos.'
+            else:
+                self.isbn = isbn_digits
+        else:
+            self.isbn = None
 
         # Regla 2: El año de publicación debe ser razonable
         if self.publication_year is not None:

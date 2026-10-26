@@ -430,12 +430,14 @@ class BookWriteSerializer(serializers.ModelSerializer):
             "id",
         ]
     def validate_isbn(self, value):
+        if not value:
+            return None
         clean_isbn = re.sub(r'[\s-]', '', str(value))
         if not clean_isbn.isdigit():
             raise serializers.ValidationError("El ISBN solo puede contener números (y guiones).")
         if len(clean_isbn) not in (10, 13):
             raise serializers.ValidationError("El ISBN debe tener exactamente 10 o 13 dígitos.")
-        return value
+        return clean_isbn
 
     def validate_publication_year(self, value):
         current_year = datetime.now().year
