@@ -86,7 +86,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         Controlador para que el bibliotecario gestione el inventario 
         de ejemplares físicos (copias de los libros).
         """
-        queryset = Item.objects.all()
+        queryset = Item.objects.select_related('book')
         serializer_class = ItemSerializer
         permission_classes = [IsLibrarianOrReadOnly]
 
@@ -102,16 +102,17 @@ class LoanViewSet(viewsets.ModelViewSet):
 
         def get_queryset(self):
                 user = self.request.user
+                base_qs = Loan.objects.select_related('item__book__editorial', 'user')
                 # Bibliotecarios y administradores pueden ver todos los préstamos
                 if user.is_authenticated and (
                         user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
                         or user.is_staff
                         or user.is_superuser
                 ):
-                        return Loan.objects.all()
+                        return base_qs.all()
                 # Lectores únicamente pueden ver sus propios préstamos
                 if user.is_authenticated:
-                        return Loan.objects.filter(user=user)
+                        return base_qs.filter(user=user)
                 return Loan.objects.none()
 
         def get_serializer_class(self):
@@ -130,13 +131,15 @@ class BookViewSet(viewsets.ModelViewSet):
         Controlador para gestionar los libros (catálogo).
         Permite lectura a lectores y gestión completa al bibliotecario.
         """
-        queryset = Book.objects.all()
+        queryset = Book.objects.select_related('editorial').prefetch_related('authors', 'genres')
         serializer_class = BookWriteSerializer
         permission_classes = [IsLibrarianOrReadOnly]
         pagination_class = BookPagination
 
         def get_queryset(self):
-                qs = Book.objects.all()
+                qs = Book.objects.select_related('editorial').prefetch_related('authors', 'genres')
+                if self.action == 'retrieve':
+                        qs = qs.prefetch_related('items', 'reservations')
 
                 genre = self.request.query_params.get('genre')
                 year = self.request.query_params.get('year')
@@ -217,7 +220,7 @@ class FavoriteViewSet(viewsets.ModelViewSet):
                 # Filtra por el usuario logueado y optimiza la carga de relaciones
                 return User.favorites.through.objects.filter(
                         user=self.request.user
-                ).select_related('user', 'book')
+                ).select_related('user', 'book__editorial')
 
         def perform_create(self, serializer):
                 # Asocia el favorito a la persona que mandó el token
@@ -260,16 +263,17 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
         def get_queryset(self):
                 user = self.request.user
+                base_qs = Reservation.objects.select_related('book__editorial', 'user')
                 # Bibliotecarios y administradores pueden ver y gestionar todas las reservas
                 if user.is_authenticated and (
                         user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
                         or user.is_staff
                         or user.is_superuser
                 ):
-                        return Reservation.objects.all()
+                        return base_qs.all()
                 # Un lector solo ve sus propias reservas
                 if user.is_authenticated:
-                        return Reservation.objects.filter(user=user)
+                        return base_qs.filter(user=user)
                 return Reservation.objects.none()
 
         def perform_create(self, serializer):
@@ -290,7 +294,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
         permission_classes = [permissions.IsAuthenticated]
 
         def get_queryset(self):
-                queryset = Review.objects.filter(deleted_at__isnull=True)
+                queryset = Review.objects.filter(deleted_at__isnull=True).select_related('book__editorial', 'user')
                 user = self.request.user
                 is_moderator = user.is_authenticated and (
                         user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
@@ -366,7 +370,7 @@ class RandomBookView(generics.GenericAPIView):
                                         filter=Q(reviews__deleted_at__isnull=True),
                                 )
                         )
-                        .prefetch_related("authors", "genres")
+                        .prefetch_related("authors", "genres", "items", "reservations")
                         .first()
                 )
 
