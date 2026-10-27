@@ -1,7 +1,7 @@
 from django.views import View
 from django.http import HttpResponse
 from django.shortcuts import render
-from rest_framework import viewsets, permissions, status, pagination
+from rest_framework import viewsets, permissions, status, pagination, throttling
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import generics
@@ -32,8 +32,13 @@ class ContactView(View):
 # PERMISOS PERSONALIZADOS
 # ==========================================
 
+class LoginRateThrottle(throttling.AnonRateThrottle):
+        scope = 'auth_login'
+
+
 class FoliumTokenObtainPairView(TokenObtainPairView):
         serializer_class = FoliumTokenObtainPairSerializer
+        throttle_classes = [LoginRateThrottle]
 
 
 class IsLibrarian(permissions.BasePermission):
@@ -238,6 +243,7 @@ class ReaderRegistrationView(generics.CreateAPIView):
         queryset = User.objects.all()
         serializer_class = UserRegisterSerializer
         permission_classes = [permissions.AllowAny]
+        throttle_classes = [LoginRateThrottle]
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):

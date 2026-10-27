@@ -29,8 +29,17 @@ SECRET_KEY = os.environ.get('SECRET_KEY')
 # DEBUG se lee desde el entorno; en producción debe ser False
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
-# Hosts permitidos; en desarrollo con Docker se acepta cualquier host
-ALLOWED_HOSTS = ['*']
+# Hosts permitidos: en desarrollo se acepta '*' o localhost; en producción se lee desde el entorno
+if DEBUG:
+    ALLOWED_HOSTS = ['*']
+else:
+    hosts_env = os.environ.get('ALLOWED_HOSTS', '')
+    ALLOWED_HOSTS = [h.strip() for h in hosts_env.split(',') if h.strip()] if hosts_env else [
+        'localhost',
+        '127.0.0.1',
+        '54.160.130.29',
+        '.vercel.app',
+    ]
 
 # Le dice a Django que use nuestro modelo de usuario personalizado en lugar del que viene por defecto
 AUTH_USER_MODEL = 'folium_api.User'
@@ -48,6 +57,7 @@ INSTALLED_APPS = [
         # Paquetes de terceros
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
 
         # Apps del proyecto
     'folium_api',
@@ -182,13 +192,30 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.BasicAuthentication',
     ],
+    # Throttling / Rate Limiting defensivo contra fuerza bruta y DoS
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '120/minute',
+        'user': '600/minute',
+        'auth_login': '30/minute',
+    },
 }
 
 # ─── JWT (djangorestframework-simplejwt) ──────────────────────────────────────
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
 }
+
+# ─── Cabeceras de Seguridad HTTP en Django ────────────────────────────────────
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_BROWSER_XSS_FILTER = True
+X_FRAME_OPTIONS = 'DENY'
 
 
 # ─── Email ────────────────────────────────────────────────────────────────────
