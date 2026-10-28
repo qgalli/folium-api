@@ -458,6 +458,9 @@ class BookListSerializer(serializers.ModelSerializer):
         many=True,
         read_only=True,
     )
+    total_items = serializers.SerializerMethodField()
+    available_items = serializers.SerializerMethodField()
+    is_available = serializers.SerializerMethodField()
 
     class Meta:
         model = Book
@@ -470,7 +473,23 @@ class BookListSerializer(serializers.ModelSerializer):
             "cover_image",
             "authors",
             "genres",
+            "total_items",
+            "available_items",
+            "is_available",
         ]
+
+    def get_total_items(self, obj):
+        return obj.items.count()
+
+    def get_available_items(self, obj):
+        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
+        pending_reservations = obj.reservations.filter(
+            status=Reservation.StatusReservation.PENDING
+        ).count()
+        return max(0, available - pending_reservations)
+
+    def get_is_available(self, obj):
+        return self.get_available_items(obj) > 0
 
 
 class BookDetailSerializer(serializers.ModelSerializer):
