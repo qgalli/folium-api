@@ -323,6 +323,365 @@ def parse_bib_file(file_bytes):
     return sorted_headers, rows
 
 
+def clean_marc_punct(text):
+    if not text:
+        return ""
+    text = str(text).strip()
+    text = re.sub(r"[\s/;:,.=\]]+$", "", text).strip()
+    text = re.sub(r"^[\s\[]+", "", text).strip()
+    return text
+
+
+def format_marc_author(name_str):
+    if not name_str:
+        return ""
+    name_str = clean_marc_punct(name_str)
+    # Remover fechas de nacimiento/defunción comunes en MARC (ej. '1927-2014' o '1899-')
+    name_str = re.sub(r",\s*\d{4}\s*-\s*\d{0,4}\.?$", "", name_str).strip()
+    name_str = clean_marc_punct(name_str)
+    if "," in name_str:
+        parts = [p.strip() for p in name_str.split(",", 1)]
+        if len(parts) == 2 and parts[1]:
+            return f"{parts[1]} {parts[0]}".strip()
+    return name_str
+
+
+def extract_marc_year(date_str):
+    if not date_str:
+        return ""
+    match = re.search(r"\b(1[4-9]\d{2}|20\d{2})\b", str(date_str))
+    return match.group(1) if match else ""
+
+
+def clean_marc_isbn(val):
+    if not val:
+        return ""
+    clean = re.sub(r"[^0-9X]", "", str(val).upper())
+    if len(clean) in (10, 13):
+        return clean
+    # Si contiene texto adicional (ej. "9780307474728 (pbk.)"), extraer la secuencia de ISBN
+    m = re.search(r"\b(97[89][0-9]{10}|[0-9]{9}[0-9X])\b", str(val).upper())
+    if m:
+        return m.group(1)
+    return clean[:13] if clean else ""
+
+
+def parse_marc_record_fields(fields, control_fields, leader=""):
+    """
+    Normaliza los campos catalográficos de un registro MARC 21 / MARCXML
+    al esquema de Folium (título, autor, ISBN, editorial, año, género, signatura, etc.).
+    """
+    row = {}
+
+    # 1. Título de la obra (245 $a, $b)
+    title_parts = []
+    for tag, subfields in fields:
+        if tag == "245":
+            sub_map = dict(subfields)
+            a = clean_marc_punct(sub_map.get("a", ""))
+            b = clean_marc_punct(sub_map.get("b", ""))
+            if a and b:
+                title_parts.append(f"{a} : {b}")
+            elif a:
+                title_parts.append(a)
+            break
+    if not title_parts:
+        for tag, subfields in fields:
+            if tag in ("240", "246"):
+                sub_map = dict(subfields)
+                a = clean_marc_punct(sub_map.get("a", ""))
+                if a:
+                    title_parts.append(a)
+                    break
+    row["title"] = title_parts[0] if title_parts else ""
+
+    # 2. Autor(es) (100 $a, 700 $a, 110 $a)
+    authors = []
+    for tag, subfields in fields:
+        if tag == "100":
+            sub_map = dict(subfields)
+            a = sub_map.get("a", "")
+            if a:
+                authors.append(format_marc_author(a))
+    for tag, subfields in fields:
+        if tag == "700":
+            sub_map = dict(subfields)
+            a = sub_map.get("a", "")
+            if a:
+                formatted = format_marc_author(a)
+                if formatted not in authors:
+                    authors.append(formatted)
+    if not authors:
+        for tag, subfields in fields:
+            if tag in ("110", "710"):
+                sub_map = dict(subfields)
+                a = clean_marc_punct(sub_map.get("a", ""))
+                if a and a not in authors:
+                    authors.append(a)
+    row["author"] = ", ".join(authors) if authors else ""
+
+    # 3. ISBN (020 $a, $z)
+    isbn = ""
+    for tag, subfields in fields:
+        if tag == "020":
+            sub_map = dict(subfields)
+            val = sub_map.get("a", "") or sub_map.get("z", "")
+            cleaned = clean_marc_isbn(val)
+            if cleaned:
+                isbn = cleaned
+                break
+    row["isbn"] = isbn
+
+    # 4. Editorial (264 $b o 260 $b)
+    editorial = ""
+    for tag, subfields in fields:
+        if tag == "264":
+            sub_map = dict(subfields)
+            b = clean_marc_punct(sub_map.get("b", ""))
+            if b:
+                editorial = b
+                break
+    if not editorial:
+        for tag, subfields in fields:
+            if tag == "260":
+                sub_map = dict(subfields)
+                b = clean_marc_punct(sub_map.get("b", ""))
+                if b:
+                    editorial = b
+                    break
+    row["editorial"] = editorial
+
+    # 5. Año de publicación (264 $c, 260 $c o campo fijo 008)
+    year = ""
+    for tag, subfields in fields:
+        if tag in ("264", "260"):
+            sub_map = dict(subfields)
+            c = sub_map.get("c", "")
+            y = extract_marc_year(c)
+            if y:
+                year = y
+                break
+    if not year and "008" in control_fields:
+        f008 = control_fields["008"]
+        if len(f008) >= 11:
+            y = extract_marc_year(f008[7:11])
+            if y:
+                year = y
+    row["year"] = year
+
+    # 6. Género / Materias (650 $a, 655 $a, 651 $a)
+    genres = []
+    for tag, subfields in fields:
+        if tag in ("650", "655", "651"):
+            sub_map = dict(subfields)
+            a = clean_marc_punct(sub_map.get("a", ""))
+            if a and a not in genres:
+                genres.append(a)
+    row["genre"] = ", ".join(genres[:3]) if genres else ""
+
+    # 7. Sinopsis / Descripción (520 $a, 500 $a)
+    desc = ""
+    for tag, subfields in fields:
+        if tag == "520":
+            sub_map = dict(subfields)
+            a = clean_marc_punct(sub_map.get("a", ""))
+            if a:
+                desc = a
+                break
+    if not desc:
+        for tag, subfields in fields:
+            if tag == "500":
+                sub_map = dict(subfields)
+                a = clean_marc_punct(sub_map.get("a", ""))
+                if a:
+                    desc = a
+                    break
+    row["description"] = desc
+
+    # 8. Signatura / Código de inventario (852 $p, 952 $p, 082 $a, 001)
+    inv = ""
+    for tag, subfields in fields:
+        if tag in ("852", "952", "949"):
+            sub_map = dict(subfields)
+            p = clean_marc_punct(sub_map.get("p", ""))
+            if p:
+                inv = p
+                break
+    if not inv:
+        for tag, subfields in fields:
+            if tag in ("082", "090"):
+                sub_map = dict(subfields)
+                a = clean_marc_punct(sub_map.get("a", ""))
+                if a:
+                    inv = a
+                    break
+    if not inv and "001" in control_fields:
+        inv = clean_marc_punct(control_fields["001"])
+    row["inventory_code"] = inv
+
+    # 9. Ubicación en sala (852 $c, $h o 952 $c)
+    loc = ""
+    for tag, subfields in fields:
+        if tag in ("852", "952"):
+            sub_map = dict(subfields)
+            c = clean_marc_punct(sub_map.get("c", ""))
+            h = clean_marc_punct(sub_map.get("h", ""))
+            loc = f"{c} - {h}".strip(" -") if c and h else (c or h)
+            if loc:
+                break
+    row["location"] = loc
+
+    return row
+
+
+def parse_marc21_bytes(file_bytes):
+    """
+    Parser nativo de registros MARC 21 en formato de comunicación ISO 2709 (.mrc, .marc, .dat).
+    Decodifica líder, directorio de etiquetas y campos variables con soporte multirregistro y UTF-8.
+    """
+    rows = []
+    headers_set = set(["title", "author"])
+    pos = 0
+    total = len(file_bytes)
+
+    while pos < total:
+        if pos + 24 > total:
+            break
+        try:
+            rec_len = int(file_bytes[pos:pos+5].decode("ascii", errors="ignore"))
+        except ValueError:
+            next_rt = file_bytes.find(b"\x1d", pos)
+            if next_rt != -1:
+                pos = next_rt + 1
+                continue
+            break
+
+        if rec_len < 25 or pos + rec_len > total:
+            next_rt = file_bytes.find(b"\x1d", pos)
+            if next_rt != -1:
+                rec_len = next_rt - pos + 1
+            else:
+                break
+
+        rec_bytes = file_bytes[pos:pos+rec_len]
+        pos += rec_len
+
+        leader = rec_bytes[:24]
+        is_utf8 = leader[9:10] == b"a"
+        enc = "utf-8" if is_utf8 else "latin-1"
+
+        try:
+            base_address = int(leader[12:17].decode("ascii", errors="ignore"))
+        except ValueError:
+            continue
+
+        dir_bytes = rec_bytes[24:base_address]
+        body_bytes = rec_bytes[base_address:]
+
+        fields = []
+        control_fields = {}
+
+        for i in range(0, len(dir_bytes) - 1, 12):
+            entry = dir_bytes[i:i+12]
+            if len(entry) < 12:
+                break
+            tag = entry[:3].decode("ascii", errors="ignore")
+            try:
+                f_len = int(entry[3:7].decode("ascii", errors="ignore"))
+                f_start = int(entry[7:12].decode("ascii", errors="ignore"))
+            except ValueError:
+                continue
+
+            f_raw = body_bytes[f_start:f_start+f_len].rstrip(b"\x1e\x1d")
+
+            try:
+                f_tag_num = int(tag)
+            except ValueError:
+                f_tag_num = 999
+
+            if f_tag_num < 10:
+                control_fields[tag] = f_raw.decode(enc, errors="replace").strip()
+            else:
+                sub_parts = f_raw[2:].split(b"\x1f") if len(f_raw) >= 2 else []
+                subfields = []
+                for p in sub_parts:
+                    if p:
+                        code = p[:1].decode("ascii", errors="ignore")
+                        val = p[1:].decode(enc, errors="replace").strip()
+                        subfields.append((code, val))
+                fields.append((tag, subfields))
+
+        row = parse_marc_record_fields(fields, control_fields, leader.decode("ascii", errors="ignore"))
+        if row.get("title") or row.get("author"):
+            rows.append(row)
+            for k in row.keys():
+                if row[k]:
+                    headers_set.add(k)
+
+    priority_headers = ["title", "author", "isbn", "editorial", "year", "genre", "description", "inventory_code", "location"]
+    sorted_headers = [h for h in priority_headers if h in headers_set]
+    sorted_headers += sorted([h for h in headers_set if h not in priority_headers])
+    return sorted_headers, rows
+
+
+def parse_marcxml_bytes(file_bytes):
+    """
+    Parser nativo de registros bibliográficos MARCXML (.xml, .marcxml) según el esquema
+    oficial de la Library of Congress (LOC MARC 21 XML Schema).
+    """
+    for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
+        try:
+            text = file_bytes.decode(enc)
+            break
+        except (UnicodeDecodeError, AttributeError):
+            continue
+    else:
+        text = file_bytes.decode("utf-8", errors="replace")
+
+    try:
+        root = ET.fromstring(text)
+    except Exception as e:
+        raise ValueError(f"No se pudo interpretar el archivo MARCXML: {str(e)}")
+
+    rows = []
+    headers_set = set(["title", "author"])
+
+    for elem in root.iter():
+        tag_name = elem.tag.split("}")[-1].lower()
+        if tag_name == "record":
+            fields = []
+            control_fields = {}
+            leader = ""
+            for child in elem:
+                c_tag = child.tag.split("}")[-1].lower()
+                if c_tag == "leader":
+                    leader = child.text or ""
+                elif c_tag == "controlfield":
+                    ftag = child.attrib.get("tag", "")
+                    control_fields[ftag] = (child.text or "").strip()
+                elif c_tag == "datafield":
+                    ftag = child.attrib.get("tag", "")
+                    subfields = []
+                    for sub in child:
+                        if sub.tag.split("}")[-1].lower() == "subfield":
+                            code = sub.attrib.get("code", "")
+                            val = (sub.text or "").strip()
+                            subfields.append((code, val))
+                    fields.append((ftag, subfields))
+
+            row = parse_marc_record_fields(fields, control_fields, leader)
+            if row.get("title") or row.get("author"):
+                rows.append(row)
+                for k in row.keys():
+                    if row[k]:
+                        headers_set.add(k)
+
+    priority_headers = ["title", "author", "isbn", "editorial", "year", "genre", "description", "inventory_code", "location"]
+    sorted_headers = [h for h in priority_headers if h in headers_set]
+    sorted_headers += sorted([h for h in headers_set if h not in priority_headers])
+    return sorted_headers, rows
+
+
 def parse_uploaded_file(uploaded_file):
     name = (uploaded_file.name or "").lower()
     file_bytes = uploaded_file.read()
@@ -331,18 +690,57 @@ def parse_uploaded_file(uploaded_file):
         return parse_xlsx_file(file_bytes)
     elif name.endswith(".bib"):
         return parse_bib_file(file_bytes)
+    elif name.endswith((".mrc", ".marc", ".dat")):
+        return parse_marc21_bytes(file_bytes)
+    elif name.endswith((".xml", ".marcxml")):
+        sample_head = file_bytes[:1024].decode("utf-8", errors="ignore").lower()
+        if "<record" in sample_head or "<collection" in sample_head or "marc21" in sample_head:
+            return parse_marcxml_bytes(file_bytes)
+        try:
+            return parse_marcxml_bytes(file_bytes)
+        except Exception:
+            return parse_xlsx_file(file_bytes)
     elif name.endswith((".csv", ".tsv", ".txt")):
-        # Verificar si un archivo .txt es en realidad BibTeX
+        # 1. Verificar si es un archivo binario MARC 21 (ISO 2709)
+        if len(file_bytes) >= 24 and file_bytes[:5].isdigit() and b"\x1e" in file_bytes[:1024]:
+            try:
+                return parse_marc21_bytes(file_bytes)
+            except Exception:
+                pass
+
+        # 2. Verificar si es XML / MARCXML
         sample_head = file_bytes[:1024].decode("utf-8", errors="ignore")
+        sample_head_lower = sample_head.lower()
+        if "<record" in sample_head_lower or "<collection" in sample_head_lower:
+            try:
+                return parse_marcxml_bytes(file_bytes)
+            except Exception:
+                pass
+
+        # 3. Verificar si es BibTeX
         if re.search(r"@([a-zA-Z]+)\s*\{\s*([^,\s\}]+)\s*,", sample_head):
             try:
                 return parse_bib_file(file_bytes)
             except Exception:
                 pass
+
         return parse_csv_file(file_bytes)
     else:
-        # Detección inteligente por contenido
+        # Detección inteligente por contenido para extensiones atípicas
+        if len(file_bytes) >= 24 and file_bytes[:5].isdigit() and b"\x1e" in file_bytes[:1024]:
+            try:
+                return parse_marc21_bytes(file_bytes)
+            except Exception:
+                pass
+
         sample_head = file_bytes[:1024].decode("utf-8", errors="ignore")
+        sample_head_lower = sample_head.lower()
+        if "<record" in sample_head_lower or "<collection" in sample_head_lower:
+            try:
+                return parse_marcxml_bytes(file_bytes)
+            except Exception:
+                pass
+
         if re.search(r"@([a-zA-Z]+)\s*\{\s*([^,\s\}]+)\s*,", sample_head):
             try:
                 return parse_bib_file(file_bytes)
@@ -357,15 +755,43 @@ def parse_uploaded_file(uploaded_file):
 
 def auto_suggest_mapping(headers):
     synonyms = {
-        "title": ["título", "titulo", "title", "nombre", "obra", "libro", "denominacion", "booktitle"],
-        "author": ["autor", "autores", "author", "authors", "escritor", "creador", "editor"],
-        "isbn": ["isbn", "isbn-10", "isbn-13", "isbn10", "isbn13", "issn", "codigo de barra", "barcode"],
-        "editorial": ["editorial", "editor", "publisher", "sello", "publicador", "institution", "organization"],
-        "year": ["año", "ano", "year", "publicacion", "fecha", "edicion", "date"],
-        "genre": ["genero", "género", "genre", "categoria", "categoría", "materia", "tema", "subject", "keywords", "keyword"],
-        "inventory_code": ["codigo", "código", "codigo de inventario", "inventario", "sig", "item", "ejemplar", "citation_key"],
-        "location": ["ubicacion", "ubicación", "estante", "location", "sector", "sala", "posicion", "dónde está", "donde esta", "address"],
-        "description": ["descripcion", "descripción", "description", "sinopsis", "resumen", "nota", "info", "abstract", "note", "annote"],
+        "title": [
+            "título", "titulo", "title", "nombre", "obra", "libro", "denominacion",
+            "booktitle", "245", "title_proper", "main_title"
+        ],
+        "author": [
+            "autor", "autores", "author", "authors", "escritor", "creador", "editor",
+            "100", "700", "110", "personal_name", "creator"
+        ],
+        "isbn": [
+            "isbn", "isbn-10", "isbn-13", "isbn10", "isbn13", "issn", "codigo de barra",
+            "barcode", "020", "standard_number"
+        ],
+        "editorial": [
+            "editorial", "editor", "publisher", "sello", "publicador", "institution",
+            "organization", "260", "264", "distributor"
+        ],
+        "year": [
+            "año", "ano", "year", "publicacion", "fecha", "edicion", "date", "008",
+            "pub_date", "publication_year"
+        ],
+        "genre": [
+            "genero", "género", "genre", "categoria", "categoría", "materia", "tema",
+            "subject", "keywords", "keyword", "650", "655", "topical_term"
+        ],
+        "inventory_code": [
+            "codigo", "código", "codigo de inventario", "inventario", "sig", "item",
+            "ejemplar", "citation_key", "barcode", "082", "090", "852", "001",
+            "control_number", "signatura", "call_number"
+        ],
+        "location": [
+            "ubicacion", "ubicación", "estante", "location", "sector", "sala",
+            "posicion", "dónde está", "donde esta", "address", "shelving", "holding"
+        ],
+        "description": [
+            "descripcion", "descripción", "description", "sinopsis", "resumen",
+            "nota", "info", "abstract", "note", "annote", "520", "500", "summary"
+        ],
     }
 
     mapping = {}

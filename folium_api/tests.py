@@ -288,3 +288,134 @@ class BookRecommendationEndpointTests(APITestCase):
 		# El Aleph no debe aparecer porque fue eliminado
 		self.assertNotIn(self.book_mid.id, returned_ids)
 
+
+
+class MarcImporterTests(APITestCase):
+	def _create_sample_marc_binary(self):
+		def make_record(fields):
+			body = bytearray()
+			directory = bytearray()
+			current_offset = 0
+			for tag, ind, content in fields:
+				field_bytes = bytearray()
+				if int(tag) < 10:
+					field_bytes.extend(content.encode('utf-8'))
+				else:
+					field_bytes.extend(ind.encode('utf-8')[:2].ljust(2, b' '))
+					for code, val in content:
+						field_bytes.append(0x1F)
+						field_bytes.extend(code.encode('utf-8')[:1])
+						field_bytes.extend(val.encode('utf-8'))
+				field_bytes.append(0x1E)
+				f_len = len(field_bytes)
+				directory.extend(f'{tag:0>3}'.encode('ascii')[:3])
+				directory.extend(f'{f_len:0>4}'.encode('ascii')[:4])
+				directory.extend(f'{current_offset:0>5}'.encode('ascii')[:5])
+				body.extend(field_bytes)
+				current_offset += f_len
+			directory.append(0x1E)
+			base_address = 24 + len(directory)
+			total_len = base_address + len(body) + 1
+			leader = f'{total_len:0>5}nam a22{base_address:0>5} u 4500'.encode('ascii')
+			record = bytearray(leader)
+			record.extend(directory)
+			record.extend(body)
+			record.append(0x1D)
+			return bytes(record)
+
+		rec1 = make_record([
+			('001', '', 'FOL-0001'),
+			('008', '', '850314s1967    ck            000 0 spa  '),
+			('020', '  ', [('a', '9780307474728')]),
+			('100', '1 ', [('a', 'García Márquez, Gabriel,')]),
+			('245', '10', [('a', 'Cien años de soledad /'), ('c', 'Gabriel García Márquez.')]),
+			('264', ' 1', [('b', 'Sudamericana,'), ('c', '1967.')]),
+			('650', ' 0', [('a', 'Realismo mágico.')]),
+			('852', '  ', [('p', 'INV-GABO-01'), ('c', 'Sala A'), ('h', 'Estante 3')]),
+			('520', '  ', [('a', 'Obra cumbre de la literatura hispanoamericana.')]),
+		])
+
+		rec2 = make_record([
+			('001', '', 'FOL-0002'),
+			('008', '', '850314s1944    ag            000 0 spa  '),
+			('020', '  ', [('a', '9789500419574')]),
+			('100', '1 ', [('a', 'Borges, Jorge Luis,')]),
+			('245', '10', [('a', 'Ficciones /'), ('c', 'Jorge Luis Borges.')]),
+			('264', ' 1', [('b', 'Sur,'), ('c', '1944.')]),
+			('650', ' 0', [('a', 'Ficción Filosófica.')]),
+			('852', '  ', [('p', 'INV-BORGES-01'), ('c', 'Sector Archivo'), ('h', 'Estantería 4')]),
+			('520', '  ', [('a', 'Colección de relatos sobre laberintos.')]),
+		])
+		return rec1 + rec2
+
+	def test_parse_marc21_binary_success(self):
+		from .importer_views import parse_marc21_bytes
+		raw_bytes = self._create_sample_marc_binary()
+		headers, rows = parse_marc21_bytes(raw_bytes)
+
+		self.assertEqual(len(rows), 2)
+		self.assertIn("title", headers)
+		self.assertIn("author", headers)
+		self.assertIn("isbn", headers)
+		self.assertIn("year", headers)
+
+		first = rows[0]
+		self.assertEqual(first["title"], "Cien años de soledad")
+		self.assertEqual(first["author"], "Gabriel García Márquez")
+		self.assertEqual(first["isbn"], "9780307474728")
+		self.assertEqual(first["editorial"], "Sudamericana")
+		self.assertEqual(first["year"], "1967")
+		self.assertEqual(first["genre"], "Realismo mágico")
+		self.assertEqual(first["inventory_code"], "INV-GABO-01")
+
+		second = rows[1]
+		self.assertEqual(second["title"], "Ficciones")
+		self.assertEqual(second["author"], "Jorge Luis Borges")
+		self.assertEqual(second["isbn"], "9789500419574")
+		self.assertEqual(second["editorial"], "Sur")
+		self.assertEqual(second["year"], "1944")
+
+	def test_parse_marcxml_success(self):
+		from .importer_views import parse_marcxml_bytes
+		xml_data = """<?xml version="1.0" encoding="UTF-8"?>
+		<collection xmlns="http://www.loc.gov/MARC21/slim">
+		  <record>
+		    <controlfield tag="001">FOL-0003</controlfield>
+		    <datafield tag="020" ind1=" " ind2=" ">
+		      <subfield code="a">9788466331906 (rústica)</subfield>
+		    </datafield>
+		    <datafield tag="100" ind1="1" ind2=" ">
+		      <subfield code="a">Cortázar, Julio,</subfield>
+		      <subfield code="d">1914-1984.</subfield>
+		    </datafield>
+		    <datafield tag="245" ind1="1" ind2="0">
+		      <subfield code="a">Rayuela /</subfield>
+		      <subfield code="b">una contranovela</subfield>
+		    </datafield>
+		    <datafield tag="260" ind1=" " ind2=" ">
+		      <subfield code="b">Sudamericana,</subfield>
+		      <subfield code="c">1963.</subfield>
+		    </datafield>
+		    <datafield tag="650" ind1=" " ind2="0">
+		      <subfield code="a">Novela experimental.</subfield>
+		    </datafield>
+		    <datafield tag="852" ind1=" " ind2=" ">
+		      <subfield code="p">INV-CORTAZAR-01</subfield>
+		      <subfield code="c">Sala A</subfield>
+		      <subfield code="h">Estante 2</subfield>
+		    </datafield>
+		  </record>
+		</collection>
+		""".encode("utf-8")
+
+		headers, rows = parse_marcxml_bytes(xml_data)
+		self.assertEqual(len(rows), 1)
+		book = rows[0]
+		self.assertEqual(book["title"], "Rayuela : una contranovela")
+		self.assertEqual(book["author"], "Julio Cortázar")
+		self.assertEqual(book["isbn"], "9788466331906")
+		self.assertEqual(book["editorial"], "Sudamericana")
+		self.assertEqual(book["year"], "1963")
+		self.assertEqual(book["genre"], "Novela experimental")
+		self.assertEqual(book["inventory_code"], "INV-CORTAZAR-01")
+		self.assertEqual(book["location"], "Sala A - Estante 2")
