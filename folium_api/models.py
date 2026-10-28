@@ -96,6 +96,13 @@ class Book(models.Model):
         if errors:
             raise ValidationError(errors)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=['deleted_at'], name='book_deleted_at_idx'),
+            models.Index(fields=['publication_year'], name='book_pub_year_idx'),
+            models.Index(fields=['title'], name='book_title_idx'),
+        ]
+
     def __str__(self):
         return self.title
     
@@ -137,6 +144,12 @@ class Item(models.Model):
 
         if errors:
             raise ValidationError(errors)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['status'], name='item_status_idx'),
+            models.Index(fields=['book', 'status'], name='item_book_status_idx'),
+        ]
 
     def __str__(self):
         return self.inventory_code
@@ -222,6 +235,13 @@ class Loan(models.Model):
         if errors:
             raise ValidationError(errors)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=['returned_at'], name='loan_returned_at_idx'),
+            models.Index(fields=['due_at'], name='loan_due_at_idx'),
+            models.Index(fields=['user', 'returned_at'], name='loan_user_ret_idx'),
+        ]
+
     def __str__(self):
         return f"Loan #{self.id} - User: {self.user.get_full_name()} - Item: {self.item.inventory_code}"
 
@@ -260,6 +280,13 @@ class Reservation(models.Model):
         if errors:
             raise ValidationError(errors)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=['status'], name='res_status_idx'),
+            models.Index(fields=['book', 'status'], name='res_book_status_idx'),
+            models.Index(fields=['user', 'status'], name='res_user_status_idx'),
+        ]
+
     def __str__(self):
         return f"Reservation #{self.id} - Book: {self.book.title}"
 
@@ -292,6 +319,13 @@ class Review(models.Model):
 
         if errors:
             raise ValidationError(errors)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['deleted_at'], name='review_deleted_at_idx'),
+            models.Index(fields=['book', 'deleted_at'], name='review_book_del_idx'),
+            models.Index(fields=['rating'], name='review_rating_idx'),
+        ]
 
     def __str__(self):
         return f"Review by {self.user.get_full_name()} for {self.book.title} ({self.rating}/5)"

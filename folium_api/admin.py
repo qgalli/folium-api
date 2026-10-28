@@ -18,15 +18,21 @@ class GenreAdmin(admin.ModelAdmin):
     list_display = ('name',)
     search_fields = ('name',)
 
+@admin.register(Editorial)
+class EditorialAdmin(admin.ModelAdmin):
+    list_display = ('name', 'created_at')
+    search_fields = ('name',)
+
 class ItemInline(admin.TabularInline):
     model = Item
     extra = 1
 
 @admin.register(Book)
 class BookAdmin(admin.ModelAdmin):
-    list_display = ('title', 'isbn', 'publication_year')
-    search_fields = ('title', 'isbn')
-    list_filter = ('genres', 'publication_year')
+    list_display = ('title', 'editorial', 'isbn', 'publication_year')
+    search_fields = ('title', 'isbn', 'editorial__name')
+    list_filter = ('editorial', 'genres', 'publication_year')
+    autocomplete_fields = ('editorial',)
     filter_horizontal = ('authors', 'genres')
     inlines = [ItemInline]
 
