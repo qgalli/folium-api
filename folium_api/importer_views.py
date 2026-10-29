@@ -56,6 +56,8 @@ def parse_importer_options(options_raw):
     default_opts = {
         "genre_separator": "auto",
         "author_format": "auto",
+        "seen_isbns": [],
+        "seen_titles": [],
     }
     if not options_raw:
         return default_opts
@@ -65,6 +67,8 @@ def parse_importer_options(options_raw):
             return {
                 "genre_separator": parsed.get("genre_separator") or "auto",
                 "author_format": parsed.get("author_format") or "auto",
+                "seen_isbns": parsed.get("seen_isbns") if isinstance(parsed.get("seen_isbns"), list) else [],
+                "seen_titles": parsed.get("seen_titles") if isinstance(parsed.get("seen_titles"), list) else [],
             }
     except Exception:
         pass
@@ -1081,13 +1085,17 @@ class CatalogImporterSimulateView(APIView):
         errors = []
         preview_items = []
 
-        # Catálogo de ISBNs y títulos existentes en memoria para comparación rápida (incluye duplicados del mismo archivo)
+        # Catálogo de ISBNs y títulos existentes en memoria para comparación rápida (incluye duplicados del mismo archivo y tandas previas)
         existing_isbns = set(
             isbn for isbn in Book.objects.filter(deleted_at__isnull=True).values_list("isbn", flat=True) if isbn
         )
+        existing_isbns.update(str(x) for x in options.get("seen_isbns", []) if x)
         existing_titles_lower = set(
             t[:45].lower() for t in Book.objects.filter(deleted_at__isnull=True).values_list("title", flat=True) if t
         )
+        existing_titles_lower.update(str(t)[:45].lower() for t in options.get("seen_titles", []) if t)
+        discovered_isbns = []
+        discovered_titles = []
 
         for idx, row in enumerate(rows, start=2): # Comienza en 2 contando la cabecera
             title_val = _clean_str(row.get(title_col, ""))
@@ -1126,7 +1134,11 @@ class CatalogImporterSimulateView(APIView):
                 new_books_count += 1
                 if isbn_val:
                     existing_isbns.add(isbn_val)
+                    if len(discovered_isbns) < 5000:
+                        discovered_isbns.append(isbn_val)
                 existing_titles_lower.add(clean_title_lower)
+                if len(discovered_titles) < 5000:
+                    discovered_titles.append(clean_title_lower)
 
             if len(preview_items) < 6:
                 parsed_authors = split_and_clean_authors(author_val, options["author_format"])
@@ -1171,6 +1183,8 @@ class CatalogImporterSimulateView(APIView):
             "errors": errors[:50], # Límite de 50 para no sobrecargar el payload
             "sample_previews": preview_items,
             "preview_items": preview_items,
+            "discovered_isbns": discovered_isbns,
+            "discovered_titles": discovered_titles,
         }, status=status.HTTP_200_OK)
 
 
