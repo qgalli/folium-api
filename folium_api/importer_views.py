@@ -3,15 +3,28 @@ import io
 import json
 import random
 import re
+import urllib.error
+import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from django.conf import settings
+from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
-from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
-from django.utils import timezone
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .models import Book, Item, Author, Genre, Editorial, User
+
+SEED_COVERS_DIR = Path(__file__).resolve().parent / "seed_assets" / "covers"
+COVER_EXTENSIONS = (".webp", ".jpg", ".jpeg", ".png")
+COVER_HTTP_HEADERS = {
+    "User-Agent": "FoliumLibraryCatalog/1.0 (+https://folium.library)",
+    "Accept": "image/webp,image/jpeg,image/png,image/*,*/*;q=0.8",
+}
 
 
 class IsLibrarianOrAdminUser(permissions.BasePermission):
@@ -52,6 +65,364 @@ def _clean_isbn(isbn_val):
     return None
 
 
+def parse_importer_options(options_raw):
+    default_opts = {
+        "genre_separator": "auto",
+        "author_format": "auto",
+        "fetch_covers_by_isbn": False,
+        "seen_isbns": [],
+        "seen_titles": [],
+    }
+    if not options_raw:
+        return default_opts
+    try:
+        parsed = json.loads(options_raw) if isinstance(options_raw, str) else options_raw
+        if isinstance(parsed, dict):
+            return {
+                "genre_separator": parsed.get("genre_separator") or "auto",
+                "author_format": parsed.get("author_format") or "auto",
+                "fetch_covers_by_isbn": bool(parsed.get("fetch_covers_by_isbn", False)),
+                "seen_isbns": parsed.get("seen_isbns") if isinstance(parsed.get("seen_isbns"), list) else [],
+                "seen_titles": parsed.get("seen_titles") if isinstance(parsed.get("seen_titles"), list) else [],
+            }
+    except Exception:
+        pass
+    return default_opts
+
+
+def _detect_image_extension(img_bytes):
+    if not img_bytes or len(img_bytes) < 500:
+        return None
+    if img_bytes.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if img_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if len(img_bytes) >= 12 and img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+        return ".webp"
+    if img_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    return None
+
+
+def find_local_cover_for_isbn(isbn):
+    """
+    Nivel 1 de búsqueda de portada por ISBN:
+    Verifica sin usar red si ya existe una imagen local para el ISBN en:
+    1) MEDIA_ROOT/books/covers/<isbn>.(webp|jpg|jpeg|png)
+    2) folium_api/seed_assets/covers/<isbn>.(webp|jpg|jpeg|png)
+    """
+    clean = _clean_isbn(isbn)
+    if not clean:
+        return None
+
+    media_covers_dir = Path(settings.MEDIA_ROOT) / "books" / "covers"
+    for ext in COVER_EXTENSIONS:
+        candidate = media_covers_dir / f"{clean}{ext}"
+        try:
+            if candidate.exists() and candidate.stat().st_size > 500:
+                return ("media", f"books/covers/{clean}{ext}", candidate)
+        except OSError:
+            continue
+
+    for ext in COVER_EXTENSIONS:
+        candidate = SEED_COVERS_DIR / f"{clean}{ext}"
+        try:
+            if candidate.exists() and candidate.stat().st_size > 500:
+                return ("seed", f"books/covers/{clean}{ext}", candidate)
+        except OSError:
+            continue
+
+    return None
+
+
+def assign_local_cover_to_book(book_obj, isbn):
+    """
+    Si existe una portada en caché local o en seed_assets para el ISBN dado,
+    asegura que el archivo esté en MEDIA_ROOT/books/covers/ y lo vincula al libro.
+    """
+    found = find_local_cover_for_isbn(isbn)
+    if not found:
+        return False
+
+    source_type, rel_media_path, src_path = found
+    media_target = Path(settings.MEDIA_ROOT) / rel_media_path
+    try:
+        if source_type == "seed" and not media_target.exists():
+            media_target.parent.mkdir(parents=True, exist_ok=True)
+            media_target.write_bytes(src_path.read_bytes())
+        book_obj.cover_image.name = rel_media_path
+        book_obj.save(update_fields=["cover_image"])
+        return True
+    except Exception:
+        return False
+
+
+def _http_get_bytes(url, timeout=3.5):
+    try:
+        req = urllib.request.Request(url, headers=COVER_HTTP_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) == 200:
+                return resp.read(2 * 1024 * 1024)  # Límite defensivo de 2 MB por portada
+    except Exception:
+        return None
+    return None
+
+
+def fetch_openlibrary_batch_urls(isbns, timeout=3.5):
+    """
+    Consulta en una sola petición HTTP hasta 25 ISBNs en la API de libros de Open Library
+    para obtener las URLs de portada existentes sin hacer llamadas fallidas innecesarias.
+    """
+    if not isbns:
+        return {}
+    bibkeys = ",".join(f"ISBN:{isbn}" for isbn in isbns)
+    url = f"https://openlibrary.org/api/books?bibkeys={bibkeys}&format=json&jscmd=data"
+    raw = _http_get_bytes(url, timeout=timeout)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="ignore"))
+        result = {}
+        for isbn in isbns:
+            entry = payload.get(f"ISBN:{isbn}") or {}
+            cover = entry.get("cover") or {}
+            cover_url = cover.get("large") or cover.get("medium")
+            if cover_url and isinstance(cover_url, str):
+                result[isbn] = cover_url
+        return result
+    except Exception:
+        return {}
+
+
+def download_remote_cover_for_isbn(isbn, ol_cover_url=None, timeout=3.5):
+    """
+    Niveles 2 y 3 de búsqueda de portada por ISBN:
+    - Nivel 2: Open Library Covers API (?default=false evita píxeles transparentes 1x1).
+    - Nivel 3: Google Books API (fallback ideal para ediciones en español/latinoamericanas).
+    Devuelve (img_bytes, ext, provider_name) o None.
+    """
+    clean = _clean_isbn(isbn)
+    if not clean:
+        return None
+
+    # Nivel 2: Open Library
+    ol_urls = []
+    if ol_cover_url:
+        ol_urls.append(ol_cover_url)
+    ol_urls.append(f"https://covers.openlibrary.org/b/isbn/{clean}-L.jpg?default=false")
+
+    for url in ol_urls:
+        img_bytes = _http_get_bytes(url, timeout=timeout)
+        ext = _detect_image_extension(img_bytes)
+        if ext:
+            return (img_bytes, ext, "openlibrary")
+
+    # Nivel 3: Google Books API
+    gb_api_url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{clean}&maxResults=1"
+    gb_raw = _http_get_bytes(gb_api_url, timeout=timeout)
+    if gb_raw:
+        try:
+            gb_data = json.loads(gb_raw.decode("utf-8", errors="ignore"))
+            items = gb_data.get("items") or []
+            if items:
+                vol_info = items[0].get("volumeInfo") or {}
+                img_links = vol_info.get("imageLinks") or {}
+                thumb_url = img_links.get("thumbnail") or img_links.get("smallThumbnail")
+                if thumb_url and isinstance(thumb_url, str):
+                    thumb_url = re.sub(r"^http://", "https://", thumb_url)
+                    thumb_url = thumb_url.replace("&edge=curl", "")
+                    img_bytes = _http_get_bytes(thumb_url, timeout=timeout)
+                    ext = _detect_image_extension(img_bytes)
+                    if ext:
+                        return (img_bytes, ext, "google_books")
+        except Exception:
+            pass
+
+    return None
+
+
+def resolve_and_save_cover_for_isbn(isbn, ol_cover_url=None, timeout=3.5):
+    """
+    Resuelve la portada de un ISBN (Nivel 1 Local -> Nivel 2 Open Library -> Nivel 3 Google Books),
+    guarda el archivo una única vez en MEDIA_ROOT/books/covers/<isbn>.<ext> y devuelve
+    (provider, rel_media_path) o (None, None).
+    """
+    clean = _clean_isbn(isbn)
+    if not clean:
+        return (None, None)
+
+    local = find_local_cover_for_isbn(clean)
+    if local:
+        source_type, rel_media_path, src_path = local
+        media_target = Path(settings.MEDIA_ROOT) / rel_media_path
+        try:
+            if source_type == "seed" and not media_target.exists():
+                media_target.parent.mkdir(parents=True, exist_ok=True)
+                media_target.write_bytes(src_path.read_bytes())
+            return ("local", rel_media_path)
+        except Exception:
+            pass
+
+    remote = download_remote_cover_for_isbn(clean, ol_cover_url=ol_cover_url, timeout=timeout)
+    if remote:
+        img_bytes, ext, provider = remote
+        rel_media_path = f"books/covers/{clean}{ext}"
+        media_target = Path(settings.MEDIA_ROOT) / rel_media_path
+        try:
+            media_target.parent.mkdir(parents=True, exist_ok=True)
+            media_target.write_bytes(img_bytes)
+            return (provider, rel_media_path)
+        except Exception:
+            return (None, None)
+
+    return (None, None)
+
+
+def split_and_clean_genres(raw_genre, separator_mode="auto"):
+    """
+    Separa cadenas con múltiples géneros (ej. "Ficción, Misterio, Clásicos")
+    en nombres individuales limpios, sin duplicados y truncados a 100 caracteres.
+    """
+    cleaned_raw = _clean_str(raw_genre)
+    if not cleaned_raw:
+        return ["General"]
+
+    if separator_mode == "none":
+        tokens = [cleaned_raw]
+    elif separator_mode == "comma":
+        tokens = re.split(r",+", cleaned_raw)
+    elif separator_mode == "semicolon":
+        tokens = re.split(r";+", cleaned_raw)
+    elif separator_mode == "slash":
+        tokens = re.split(r"/+", cleaned_raw)
+    else:
+        # Modo automático: divide por coma, punto y coma, barra o tubería
+        tokens = re.split(r"[,;/|]+", cleaned_raw)
+
+    result = []
+    seen_lower = set()
+    for token in tokens:
+        g = re.sub(r"^[\s.,;:/\-–—]+|[\s.,;:/\-–—]+$", "", _clean_str(token))
+        g = re.sub(r"\s+", " ", g).strip()[:100]
+        if g and g.lower() not in seen_lower:
+            seen_lower.add(g.lower())
+            result.append(g)
+
+    return result if result else ["General"]
+
+
+def _split_fullname_into_pair(fullname_str):
+    parts = fullname_str.split()
+    if len(parts) >= 2:
+        first_name = _sanitize_name_text(parts[0], 45, "Autor")
+        last_name = _sanitize_name_text(" ".join(parts[1:]), 45, "-")
+    else:
+        first_name = _sanitize_name_text(fullname_str, 45, "Autor")
+        last_name = "-"
+    return (first_name, last_name)
+
+
+def split_and_clean_authors(raw_author, author_format="auto"):
+    """
+    Analiza la celda de autor(es) y devuelve una lista de tuplas (first_name, last_name).
+    En modo 'auto' distingue entre un autor escrito como "Apellido, Nombre"
+    (ej. "Borges, Jorge Luis" o "García Márquez, Gabriel") y múltiples autores
+    separados por coma, punto y coma o conjunciones.
+    """
+    cleaned_raw = _clean_str(raw_author)
+    if not cleaned_raw or cleaned_raw.lower() == "autor no especificado":
+        return [("Autor", "-")]
+
+    pairs = []
+
+    if author_format == "lastname_firstname":
+        # Varios autores se separan por ';' o 'and'/'&'; la coma interna invierte "Apellido, Nombre"
+        raw_authors = [a.strip() for a in re.split(r";+|\s+(?:and|&)\s+", cleaned_raw, flags=re.IGNORECASE) if a.strip()]
+        for item in raw_authors:
+            if "," in item:
+                last_part, first_part = item.split(",", 1)
+                fn = _sanitize_name_text(first_part, 45, "Autor")
+                ln = _sanitize_name_text(last_part, 45, "-")
+                pairs.append((fn, ln))
+            else:
+                pairs.append(_split_fullname_into_pair(item))
+
+    elif author_format == "firstname_lastname":
+        # Cada coma o punto y coma separa autores distintos en orden "Nombre Apellido"
+        raw_authors = [
+            a.strip()
+            for a in re.split(r"[,;]+|\s+(?:and|y|&)\s+", cleaned_raw, flags=re.IGNORECASE)
+            if a.strip()
+        ]
+        for item in raw_authors:
+            pairs.append(_split_fullname_into_pair(item))
+
+    else:
+        # Modo automático ("auto")
+        if ";" in cleaned_raw or re.search(r"\s+(?:and|&)\s+", cleaned_raw, flags=re.IGNORECASE):
+            segments = [
+                s.strip()
+                for s in re.split(r";+|\s+(?:and|&)\s+", cleaned_raw, flags=re.IGNORECASE)
+                if s.strip()
+            ]
+            for seg in segments:
+                if seg.count(",") == 1:
+                    last_part, first_part = seg.split(",", 1)
+                    fn = _sanitize_name_text(first_part, 45, "Autor")
+                    ln = _sanitize_name_text(last_part, 45, "-")
+                    pairs.append((fn, ln))
+                else:
+                    for sub in [x.strip() for x in seg.split(",") if x.strip()]:
+                        pairs.append(_split_fullname_into_pair(sub))
+        elif "," in cleaned_raw:
+            comma_parts = [p.strip() for p in cleaned_raw.split(",") if p.strip()]
+            if len(comma_parts) == 2:
+                w0 = len(comma_parts[0].split())
+                w1 = len(comma_parts[1].split())
+                # Heurística para "Apellido, Nombre" (ej. "Borges, Jorge Luis" [1,2] o "García Márquez, Gabriel" [2,1])
+                if (w0 == 1 and w1 <= 3) or (w0 <= 2 and w1 == 1):
+                    fn = _sanitize_name_text(comma_parts[1], 45, "Autor")
+                    ln = _sanitize_name_text(comma_parts[0], 45, "-")
+                    pairs.append((fn, ln))
+                else:
+                    for part in comma_parts:
+                        pairs.append(_split_fullname_into_pair(part))
+            else:
+                for part in comma_parts:
+                    pairs.append(_split_fullname_into_pair(part))
+        else:
+            # Sin comas ni punto y coma; verificar si hay " y " entre dos nombres completos
+            y_parts = [p.strip() for p in re.split(r"\s+y\s+", cleaned_raw, flags=re.IGNORECASE) if p.strip()]
+            if len(y_parts) > 1 and all(len(p.split()) >= 2 for p in y_parts):
+                for part in y_parts:
+                    pairs.append(_split_fullname_into_pair(part))
+            else:
+                pairs.append(_split_fullname_into_pair(cleaned_raw))
+
+    # Desduplicar preservando orden y limitar a los primeros 5 autores
+    unique_pairs = []
+    seen = set()
+    for fn, ln in pairs:
+        key = (fn.lower(), ln.lower())
+        if key not in seen:
+            seen.add(key)
+            unique_pairs.append((fn, ln))
+
+    return unique_pairs[:5] if unique_pairs else [("Autor", "-")]
+
+
+def _excel_col_to_index(cell_ref):
+    if not cell_ref:
+        return None
+    col_letters = "".join(ch for ch in str(cell_ref) if ch.isalpha()).upper()
+    if not col_letters:
+        return None
+    idx = 0
+    for ch in col_letters:
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
 def parse_csv_file(file_bytes):
     # Detección de encoding
     for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
@@ -84,35 +455,49 @@ def parse_csv_file(file_bytes):
 
 
 def parse_xlsx_file(file_bytes):
-    # Parser nativo de XLSX usando zipfile y ElementTree estándar
+    # Parser nativo de XLSX usando zipfile y ElementTree estándar con alineación por coordenada de celda
     try:
         zf = zipfile.ZipFile(io.BytesIO(file_bytes))
+        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
         shared_strings = []
         if "xl/sharedStrings.xml" in zf.namelist():
             ss_tree = ET.fromstring(zf.read("xl/sharedStrings.xml"))
-            for si in ss_tree.findall("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}si"):
-                t = si.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
-                shared_strings.append(t.text if t is not None and t.text else "")
+            for si in ss_tree.findall(f"{ns}si"):
+                shared_strings.append("".join(si.itertext()))
 
         sheet_xml = zf.read("xl/worksheets/sheet1.xml")
         sheet_tree = ET.fromstring(sheet_xml)
-        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
         matrix = []
         for row in sheet_tree.iter(f"{ns}row"):
-            row_vals = []
+            row_cells = {}
+            next_col_idx = 0
             for c in row.iter(f"{ns}c"):
-                v_el = c.find(f"{ns}v")
-                if v_el is None or v_el.text is None:
-                    row_vals.append("")
-                    continue
-                raw_val = v_el.text
-                if c.get("t") == "s":
-                    idx = int(raw_val)
-                    row_vals.append(shared_strings[idx] if idx < len(shared_strings) else "")
+                col_idx = _excel_col_to_index(c.get("r"))
+                if col_idx is None:
+                    col_idx = next_col_idx
+                next_col_idx = col_idx + 1
+
+                cell_type = c.get("t")
+                cell_val = ""
+                if cell_type == "inlineStr":
+                    is_el = c.find(f"{ns}is")
+                    cell_val = "".join(is_el.itertext()) if is_el is not None else ""
                 else:
-                    row_vals.append(raw_val)
-            if any(row_vals):
+                    v_el = c.find(f"{ns}v")
+                    if v_el is not None and v_el.text is not None:
+                        raw_val = v_el.text
+                        if cell_type == "s":
+                            idx = int(raw_val)
+                            cell_val = shared_strings[idx] if idx < len(shared_strings) else ""
+                        else:
+                            cell_val = raw_val
+
+                row_cells[col_idx] = cell_val
+
+            if row_cells and any(_clean_str(v) for v in row_cells.values()):
+                max_col = max(row_cells.keys())
+                row_vals = [row_cells.get(i, "") for i in range(max_col + 1)]
                 matrix.append(row_vals)
 
         if not matrix:
@@ -858,6 +1243,7 @@ class CatalogImporterSimulateView(APIView):
     def post(self, request, *args, **kwargs):
         uploaded_file = request.FILES.get("file")
         mapping_raw = request.data.get("mapping", "{}")
+        options_raw = request.data.get("options", "{}")
 
         if not uploaded_file:
             return Response(
@@ -873,6 +1259,8 @@ class CatalogImporterSimulateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        options = parse_importer_options(options_raw)
+
         try:
             _, rows = parse_uploaded_file(uploaded_file)
         except Exception as err:
@@ -884,6 +1272,9 @@ class CatalogImporterSimulateView(APIView):
         title_col = mapping.get("title")
         author_col = mapping.get("author")
         isbn_col = mapping.get("isbn")
+        editorial_col = mapping.get("editorial")
+        year_col = mapping.get("year")
+        genre_col = mapping.get("genre")
 
         if not title_col or not author_col:
             return Response(
@@ -897,13 +1288,17 @@ class CatalogImporterSimulateView(APIView):
         errors = []
         preview_items = []
 
-        # Catálogo de ISBNs y títulos existentes en memoria para comparación rápida
+        # Catálogo de ISBNs y títulos existentes en memoria para comparación rápida (incluye duplicados del mismo archivo y tandas previas)
         existing_isbns = set(
-            Book.objects.filter(deleted_at__isnull=True).values_list("isbn", flat=True)
+            isbn for isbn in Book.objects.filter(deleted_at__isnull=True).values_list("isbn", flat=True) if isbn
         )
-        existing_titles = set(
-            Book.objects.filter(deleted_at__isnull=True).values_list("title", flat=True)
+        existing_isbns.update(str(x) for x in options.get("seen_isbns", []) if x)
+        existing_titles_lower = set(
+            t[:45].lower() for t in Book.objects.filter(deleted_at__isnull=True).values_list("title", flat=True) if t
         )
+        existing_titles_lower.update(str(t)[:45].lower() for t in options.get("seen_titles", []) if t)
+        discovered_isbns = []
+        discovered_titles = []
 
         for idx, row in enumerate(rows, start=2): # Comienza en 2 contando la cabecera
             title_val = _clean_str(row.get(title_col, ""))
@@ -915,9 +1310,11 @@ class CatalogImporterSimulateView(APIView):
                 continue
 
             if not title_val:
+                reason_msg = "La fila contiene datos pero no tiene título especificado."
                 errors.append({
                     "row": idx,
-                    "reason": "La fila contiene datos pero no tiene título especificado.",
+                    "reason": reason_msg,
+                    "error": reason_msg,
                     "data": row,
                 })
                 continue
@@ -927,34 +1324,71 @@ class CatalogImporterSimulateView(APIView):
 
             valid_rows += 1
 
+            clean_title_lower = title_val[:45].lower()
             is_existing = False
             if isbn_val and isbn_val in existing_isbns:
                 is_existing = True
-            elif title_val.lower() in [t.lower() for t in existing_titles]:
+            elif clean_title_lower in existing_titles_lower:
                 is_existing = True
 
             if is_existing:
                 existing_books_count += 1
             else:
                 new_books_count += 1
+                if isbn_val:
+                    existing_isbns.add(isbn_val)
+                    if len(discovered_isbns) < 5000:
+                        discovered_isbns.append(isbn_val)
+                existing_titles_lower.add(clean_title_lower)
+                if len(discovered_titles) < 5000:
+                    discovered_titles.append(clean_title_lower)
 
-            if len(preview_items) < 5:
+            if len(preview_items) < 6:
+                parsed_authors = split_and_clean_authors(author_val, options["author_format"])
+                authors_display_list = [
+                    f"{fn} {ln}".strip() if ln != "-" else fn
+                    for fn, ln in parsed_authors
+                ]
+                raw_genre_val = _clean_str(row.get(genre_col, "")) if genre_col else ""
+                parsed_genres = split_and_clean_genres(raw_genre_val, options["genre_separator"])
+
+                ed_val = _clean_str(row.get(editorial_col, "")) if editorial_col else ""
+                year_val = ""
+                if year_col and row.get(year_col):
+                    m_y = re.search(r"\b(1\d{3}|20\d{2})\b", _clean_str(row[year_col]))
+                    if m_y:
+                        year_val = m_y.group(1)
+
                 preview_items.append({
                     "row": idx,
                     "title": title_val[:45],
-                    "author": author_val,
-                    "isbn": isbn_val or "Sin ISBN",
+                    "author": ", ".join(authors_display_list),
+                    "authors_list": authors_display_list,
+                    "genres_list": parsed_genres,
+                    "isbn": isbn_val or "",
+                    "has_local_cover": bool(isbn_val and find_local_cover_for_isbn(isbn_val)),
+                    "editorial": ed_val[:150] if ed_val else "",
+                    "year": year_val,
+                    "status": "EXISTING" if is_existing else "NEW",
                     "status_simulated": "Existente (añadirá copia)" if is_existing else "Nuevo libro",
                 })
 
         return Response({
+            "success": True,
             "total_rows": len(rows),
             "valid_rows": valid_rows,
+            "new_books": new_books_count,
             "new_books_count": new_books_count,
+            "existing_books": existing_books_count,
             "existing_books_count": existing_books_count,
+            "rows_with_errors": len(errors),
             "errors_count": len(errors),
+            "error_details": errors[:50],
             "errors": errors[:50], # Límite de 50 para no sobrecargar el payload
+            "sample_previews": preview_items,
             "preview_items": preview_items,
+            "discovered_isbns": discovered_isbns,
+            "discovered_titles": discovered_titles,
         }, status=status.HTTP_200_OK)
 
 
@@ -970,6 +1404,7 @@ class CatalogImporterExecuteView(APIView):
     def post(self, request, *args, **kwargs):
         uploaded_file = request.FILES.get("file")
         mapping_raw = request.data.get("mapping", "{}")
+        options_raw = request.data.get("options", "{}")
 
         if not uploaded_file:
             return Response(
@@ -984,6 +1419,8 @@ class CatalogImporterExecuteView(APIView):
                 {"detail": "El mapa de campos recibido no tiene un formato JSON válido."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        options = parse_importer_options(options_raw)
 
         try:
             _, rows = parse_uploaded_file(uploaded_file)
@@ -1012,11 +1449,11 @@ class CatalogImporterExecuteView(APIView):
         imported_books = 0
         imported_items = 0
         skipped_count = 0
-        execution_errors = []
-
-        # Generador de códigos únicos para ítems e ISBNs sintéticos
-        base_timestamp = int(timezone.now().timestamp())
         synthetic_counter = 1
+        covers_assigned = 0
+        pending_cover_isbns = []
+        pending_cover_isbns_set = set()
+        fetch_covers = bool(options.get("fetch_covers_by_isbn", False))
 
         with transaction.atomic():
             for idx, row in enumerate(rows, start=2):
@@ -1034,10 +1471,12 @@ class CatalogImporterExecuteView(APIView):
                 if not author_val:
                     author_val = "Autor no especificado"
 
-                # 1. Editorial
+                # 1. Editorial (búsqueda case-insensitive antes de crear)
                 ed_name = _clean_str(row.get(editorial_col, "")) if editorial_col else ""
                 ed_name = ed_name[:150] if ed_name else "Editorial Independiente"
-                editorial_obj, _ = Editorial.objects.get_or_create(name=ed_name)
+                editorial_obj = Editorial.objects.filter(name__iexact=ed_name).first()
+                if not editorial_obj:
+                    editorial_obj = Editorial.objects.create(name=ed_name)
 
                 # 2. ISBN y Desduplicación de Book
                 isbn_val = _clean_isbn(row.get(isbn_col, "")) if isbn_col else None
@@ -1047,7 +1486,6 @@ class CatalogImporterExecuteView(APIView):
                     book_obj = Book.objects.filter(isbn=isbn_val, deleted_at__isnull=True).first()
 
                 if not book_obj:
-                    # Intenta buscar por Título y primer Autor
                     clean_title = title_val[:45]
                     candidate = Book.objects.filter(
                         title__iexact=clean_title,
@@ -1058,7 +1496,6 @@ class CatalogImporterExecuteView(APIView):
 
                 # Si el libro no existe, lo creamos
                 if not book_obj:
-                    # Año de publicación (el ISBN queda None si no está presente en el archivo)
                     year_val = None
                     if year_col and row.get(year_col):
                         match_year = re.search(r"\b(1\d{3}|20\d{2})\b", _clean_str(row[year_col]))
@@ -1076,31 +1513,38 @@ class CatalogImporterExecuteView(APIView):
                     )
                     imported_books += 1
 
-                    # 3. Autores
-                    # Divide si vienen múltiples autores separados por coma o punto y coma
-                    authors_list = [a.strip() for a in re.split(r"[,;]+", author_val) if a.strip()]
-                    if not authors_list:
-                        authors_list = [author_val]
-
-                    for single_author in authors_list[:3]: # Limita a los primeros 3 autores
-                        parts = single_author.split()
-                        if len(parts) >= 2:
-                            first_name = _sanitize_name_text(parts[0], 45, "Autor")
-                            last_name = _sanitize_name_text(" ".join(parts[1:]), 45, "-")
-                        else:
-                            first_name = _sanitize_name_text(single_author, 45, "Autor")
-                            last_name = "-"
-
-                        author_obj, _ = Author.objects.get_or_create(
-                            name=first_name,
-                            last_name=last_name,
-                        )
+                    # 3. Autores (separación inteligente + búsqueda case-insensitive)
+                    parsed_authors = split_and_clean_authors(author_val, options["author_format"])
+                    for first_name, last_name in parsed_authors:
+                        author_obj = Author.objects.filter(
+                            name__iexact=first_name,
+                            last_name__iexact=last_name,
+                        ).first()
+                        if not author_obj:
+                            author_obj = Author.objects.create(
+                                name=first_name,
+                                last_name=last_name,
+                            )
                         book_obj.authors.add(author_obj)
 
-                    # 4. Género
-                    genre_name = _clean_str(row.get(genre_col, "")) if genre_col else ""
-                    genre_name = genre_name[:100] if genre_name else "General"
-                    genre_obj, _ = Genre.objects.get_or_create(name=genre_name)
+                # Si el bibliotecario eligió buscar portadas por ISBN y el libro no tiene portada aún
+                effective_isbn = isbn_val or _clean_isbn(book_obj.isbn)
+                if fetch_covers and effective_isbn and not book_obj.cover_image:
+                    if assign_local_cover_to_book(book_obj, effective_isbn):
+                        covers_assigned += 1
+                    elif effective_isbn not in pending_cover_isbns_set:
+                        pending_cover_isbns_set.add(effective_isbn)
+                        pending_cover_isbns.append(effective_isbn)
+
+                # 4. Géneros (división en géneros individuales + búsqueda case-insensitive)
+                raw_genre_val = _clean_str(row.get(genre_col, "")) if genre_col else ""
+                parsed_genres = split_and_clean_genres(raw_genre_val, options["genre_separator"])
+                for g_name in parsed_genres:
+                    if g_name == "General" and book_obj.genres.exists():
+                        continue
+                    genre_obj = Genre.objects.filter(name__iexact=g_name).first()
+                    if not genre_obj:
+                        genre_obj = Genre.objects.create(name=g_name)
                     book_obj.genres.add(genre_obj)
 
                 # 5. Creación de la copia física (Item)
@@ -1130,5 +1574,104 @@ class CatalogImporterExecuteView(APIView):
             "imported_books": imported_books,
             "imported_items": imported_items,
             "skipped_rows": skipped_count,
+            "covers_assigned": covers_assigned,
+            "pending_cover_isbns": pending_cover_isbns,
             "message": f"Se importaron con éxito {imported_books} obras y {imported_items} ejemplares físicos.",
         }, status=status.HTTP_201_CREATED)
+
+
+class CatalogImporterFetchCoversView(APIView):
+    """
+    POST /api/v1/importer/fetch-covers/
+    Recibe una micro-tanda de ISBNs (hasta 25 por petición) y busca sus portadas en cascada:
+    1) Caché local (MEDIA_ROOT/books/covers/ y seed_assets/covers/)
+    2) Open Library Books & Covers API
+    3) Google Books API
+    Guarda las portadas encontradas y las asocia a las obras correspondientes sin portada.
+    """
+    permission_classes = [IsLibrarianOrAdminUser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def post(self, request, *args, **kwargs):
+        raw_isbns = request.data.get("isbns", [])
+        if isinstance(raw_isbns, str):
+            try:
+                raw_isbns = json.loads(raw_isbns)
+            except Exception:
+                raw_isbns = [x.strip() for x in raw_isbns.split(",") if x.strip()]
+
+        if not isinstance(raw_isbns, list):
+            return Response(
+                {"detail": "El campo 'isbns' debe ser una lista de códigos ISBN."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        clean_isbns = []
+        seen = set()
+        for val in raw_isbns:
+            c = _clean_isbn(val)
+            if c and c not in seen:
+                seen.add(c)
+                clean_isbns.append(c)
+            if len(clean_isbns) >= 25:
+                break
+
+        if not clean_isbns:
+            return Response({
+                "success": True,
+                "processed": 0,
+                "found": 0,
+                "not_found": 0,
+                "sources": {},
+            }, status=status.HTTP_200_OK)
+
+        # Pre-consultar en lote a Open Library para los ISBNs que no estén ya en caché local
+        remote_candidates = [isbn for isbn in clean_isbns if not find_local_cover_for_isbn(isbn)]
+        ol_batch_urls = fetch_openlibrary_batch_urls(remote_candidates, timeout=3.5) if remote_candidates else {}
+
+        resolved_paths = {}
+        sources = {}
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            future_to_isbn = {
+                executor.submit(
+                    resolve_and_save_cover_for_isbn,
+                    isbn,
+                    ol_batch_urls.get(isbn),
+                    3.5,
+                ): isbn
+                for isbn in clean_isbns
+            }
+            for future in as_completed(future_to_isbn):
+                isbn = future_to_isbn[future]
+                try:
+                    provider, rel_path = future.result()
+                    if provider and rel_path:
+                        resolved_paths[isbn] = rel_path
+                        sources[isbn] = provider
+                    else:
+                        sources[isbn] = "not_found"
+                except Exception:
+                    sources[isbn] = "error"
+
+        updated_books = 0
+        for isbn, rel_path in resolved_paths.items():
+            books_to_update = Book.objects.filter(
+                isbn=isbn,
+                deleted_at__isnull=True,
+            ).filter(Q(cover_image__isnull=True) | Q(cover_image=""))
+            for book_obj in books_to_update:
+                book_obj.cover_image.name = rel_path
+                book_obj.save(update_fields=["cover_image"])
+                updated_books += 1
+
+        found_count = len(resolved_paths)
+        return Response({
+            "success": True,
+            "processed": len(clean_isbns),
+            "found": found_count,
+            "not_found": len(clean_isbns) - found_count,
+            "updated_books": updated_books,
+            "sources": sources,
+        }, status=status.HTTP_200_OK)
+

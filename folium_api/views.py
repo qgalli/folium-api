@@ -143,7 +143,7 @@ class BookViewSet(viewsets.ModelViewSet):
 
         def get_queryset(self):
                 qs = Book.objects.select_related('editorial').prefetch_related('authors', 'genres')
-                if self.action == 'retrieve':
+                if self.action in ['list', 'retrieve']:
                         qs = qs.prefetch_related('items', 'reservations')
 
                 genre = self.request.query_params.get('genre')
