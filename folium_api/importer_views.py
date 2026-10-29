@@ -52,6 +52,170 @@ def _clean_isbn(isbn_val):
     return None
 
 
+def parse_importer_options(options_raw):
+    default_opts = {
+        "genre_separator": "auto",
+        "author_format": "auto",
+    }
+    if not options_raw:
+        return default_opts
+    try:
+        parsed = json.loads(options_raw) if isinstance(options_raw, str) else options_raw
+        if isinstance(parsed, dict):
+            return {
+                "genre_separator": parsed.get("genre_separator") or "auto",
+                "author_format": parsed.get("author_format") or "auto",
+            }
+    except Exception:
+        pass
+    return default_opts
+
+
+def split_and_clean_genres(raw_genre, separator_mode="auto"):
+    """
+    Separa cadenas con múltiples géneros (ej. "Ficción, Misterio, Clásicos")
+    en nombres individuales limpios, sin duplicados y truncados a 100 caracteres.
+    """
+    cleaned_raw = _clean_str(raw_genre)
+    if not cleaned_raw:
+        return ["General"]
+
+    if separator_mode == "none":
+        tokens = [cleaned_raw]
+    elif separator_mode == "comma":
+        tokens = re.split(r",+", cleaned_raw)
+    elif separator_mode == "semicolon":
+        tokens = re.split(r";+", cleaned_raw)
+    elif separator_mode == "slash":
+        tokens = re.split(r"/+", cleaned_raw)
+    else:
+        # Modo automático: divide por coma, punto y coma, barra o tubería
+        tokens = re.split(r"[,;/|]+", cleaned_raw)
+
+    result = []
+    seen_lower = set()
+    for token in tokens:
+        g = re.sub(r"^[\s.,;:/\-–—]+|[\s.,;:/\-–—]+$", "", _clean_str(token))
+        g = re.sub(r"\s+", " ", g).strip()[:100]
+        if g and g.lower() not in seen_lower:
+            seen_lower.add(g.lower())
+            result.append(g)
+
+    return result if result else ["General"]
+
+
+def _split_fullname_into_pair(fullname_str):
+    parts = fullname_str.split()
+    if len(parts) >= 2:
+        first_name = _sanitize_name_text(parts[0], 45, "Autor")
+        last_name = _sanitize_name_text(" ".join(parts[1:]), 45, "-")
+    else:
+        first_name = _sanitize_name_text(fullname_str, 45, "Autor")
+        last_name = "-"
+    return (first_name, last_name)
+
+
+def split_and_clean_authors(raw_author, author_format="auto"):
+    """
+    Analiza la celda de autor(es) y devuelve una lista de tuplas (first_name, last_name).
+    En modo 'auto' distingue entre un autor escrito como "Apellido, Nombre"
+    (ej. "Borges, Jorge Luis" o "García Márquez, Gabriel") y múltiples autores
+    separados por coma, punto y coma o conjunciones.
+    """
+    cleaned_raw = _clean_str(raw_author)
+    if not cleaned_raw or cleaned_raw.lower() == "autor no especificado":
+        return [("Autor", "-")]
+
+    pairs = []
+
+    if author_format == "lastname_firstname":
+        # Varios autores se separan por ';' o 'and'/'&'; la coma interna invierte "Apellido, Nombre"
+        raw_authors = [a.strip() for a in re.split(r";+|\s+(?:and|&)\s+", cleaned_raw, flags=re.IGNORECASE) if a.strip()]
+        for item in raw_authors:
+            if "," in item:
+                last_part, first_part = item.split(",", 1)
+                fn = _sanitize_name_text(first_part, 45, "Autor")
+                ln = _sanitize_name_text(last_part, 45, "-")
+                pairs.append((fn, ln))
+            else:
+                pairs.append(_split_fullname_into_pair(item))
+
+    elif author_format == "firstname_lastname":
+        # Cada coma o punto y coma separa autores distintos en orden "Nombre Apellido"
+        raw_authors = [
+            a.strip()
+            for a in re.split(r"[,;]+|\s+(?:and|y|&)\s+", cleaned_raw, flags=re.IGNORECASE)
+            if a.strip()
+        ]
+        for item in raw_authors:
+            pairs.append(_split_fullname_into_pair(item))
+
+    else:
+        # Modo automático ("auto")
+        if ";" in cleaned_raw or re.search(r"\s+(?:and|&)\s+", cleaned_raw, flags=re.IGNORECASE):
+            segments = [
+                s.strip()
+                for s in re.split(r";+|\s+(?:and|&)\s+", cleaned_raw, flags=re.IGNORECASE)
+                if s.strip()
+            ]
+            for seg in segments:
+                if seg.count(",") == 1:
+                    last_part, first_part = seg.split(",", 1)
+                    fn = _sanitize_name_text(first_part, 45, "Autor")
+                    ln = _sanitize_name_text(last_part, 45, "-")
+                    pairs.append((fn, ln))
+                else:
+                    for sub in [x.strip() for x in seg.split(",") if x.strip()]:
+                        pairs.append(_split_fullname_into_pair(sub))
+        elif "," in cleaned_raw:
+            comma_parts = [p.strip() for p in cleaned_raw.split(",") if p.strip()]
+            if len(comma_parts) == 2:
+                w0 = len(comma_parts[0].split())
+                w1 = len(comma_parts[1].split())
+                # Heurística para "Apellido, Nombre" (ej. "Borges, Jorge Luis" [1,2] o "García Márquez, Gabriel" [2,1])
+                if (w0 == 1 and w1 <= 3) or (w0 <= 2 and w1 == 1):
+                    fn = _sanitize_name_text(comma_parts[1], 45, "Autor")
+                    ln = _sanitize_name_text(comma_parts[0], 45, "-")
+                    pairs.append((fn, ln))
+                else:
+                    for part in comma_parts:
+                        pairs.append(_split_fullname_into_pair(part))
+            else:
+                for part in comma_parts:
+                    pairs.append(_split_fullname_into_pair(part))
+        else:
+            # Sin comas ni punto y coma; verificar si hay " y " entre dos nombres completos
+            y_parts = [p.strip() for p in re.split(r"\s+y\s+", cleaned_raw, flags=re.IGNORECASE) if p.strip()]
+            if len(y_parts) > 1 and all(len(p.split()) >= 2 for p in y_parts):
+                for part in y_parts:
+                    pairs.append(_split_fullname_into_pair(part))
+            else:
+                pairs.append(_split_fullname_into_pair(cleaned_raw))
+
+    # Desduplicar preservando orden y limitar a los primeros 5 autores
+    unique_pairs = []
+    seen = set()
+    for fn, ln in pairs:
+        key = (fn.lower(), ln.lower())
+        if key not in seen:
+            seen.add(key)
+            unique_pairs.append((fn, ln))
+
+    return unique_pairs[:5] if unique_pairs else [("Autor", "-")]
+
+
+def _excel_col_to_index(cell_ref):
+    if not cell_ref:
+        return None
+    col_letters = "".join(ch for ch in str(cell_ref) if ch.isalpha()).upper()
+    if not col_letters:
+        return None
+    idx = 0
+    for ch in col_letters:
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
 def parse_csv_file(file_bytes):
     # Detección de encoding
     for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
@@ -84,35 +248,49 @@ def parse_csv_file(file_bytes):
 
 
 def parse_xlsx_file(file_bytes):
-    # Parser nativo de XLSX usando zipfile y ElementTree estándar
+    # Parser nativo de XLSX usando zipfile y ElementTree estándar con alineación por coordenada de celda
     try:
         zf = zipfile.ZipFile(io.BytesIO(file_bytes))
+        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
         shared_strings = []
         if "xl/sharedStrings.xml" in zf.namelist():
             ss_tree = ET.fromstring(zf.read("xl/sharedStrings.xml"))
-            for si in ss_tree.findall("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}si"):
-                t = si.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
-                shared_strings.append(t.text if t is not None and t.text else "")
+            for si in ss_tree.findall(f"{ns}si"):
+                shared_strings.append("".join(si.itertext()))
 
         sheet_xml = zf.read("xl/worksheets/sheet1.xml")
         sheet_tree = ET.fromstring(sheet_xml)
-        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
         matrix = []
         for row in sheet_tree.iter(f"{ns}row"):
-            row_vals = []
+            row_cells = {}
+            next_col_idx = 0
             for c in row.iter(f"{ns}c"):
-                v_el = c.find(f"{ns}v")
-                if v_el is None or v_el.text is None:
-                    row_vals.append("")
-                    continue
-                raw_val = v_el.text
-                if c.get("t") == "s":
-                    idx = int(raw_val)
-                    row_vals.append(shared_strings[idx] if idx < len(shared_strings) else "")
+                col_idx = _excel_col_to_index(c.get("r"))
+                if col_idx is None:
+                    col_idx = next_col_idx
+                next_col_idx = col_idx + 1
+
+                cell_type = c.get("t")
+                cell_val = ""
+                if cell_type == "inlineStr":
+                    is_el = c.find(f"{ns}is")
+                    cell_val = "".join(is_el.itertext()) if is_el is not None else ""
                 else:
-                    row_vals.append(raw_val)
-            if any(row_vals):
+                    v_el = c.find(f"{ns}v")
+                    if v_el is not None and v_el.text is not None:
+                        raw_val = v_el.text
+                        if cell_type == "s":
+                            idx = int(raw_val)
+                            cell_val = shared_strings[idx] if idx < len(shared_strings) else ""
+                        else:
+                            cell_val = raw_val
+
+                row_cells[col_idx] = cell_val
+
+            if row_cells and any(_clean_str(v) for v in row_cells.values()):
+                max_col = max(row_cells.keys())
+                row_vals = [row_cells.get(i, "") for i in range(max_col + 1)]
                 matrix.append(row_vals)
 
         if not matrix:
@@ -858,6 +1036,7 @@ class CatalogImporterSimulateView(APIView):
     def post(self, request, *args, **kwargs):
         uploaded_file = request.FILES.get("file")
         mapping_raw = request.data.get("mapping", "{}")
+        options_raw = request.data.get("options", "{}")
 
         if not uploaded_file:
             return Response(
@@ -873,6 +1052,8 @@ class CatalogImporterSimulateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        options = parse_importer_options(options_raw)
+
         try:
             _, rows = parse_uploaded_file(uploaded_file)
         except Exception as err:
@@ -884,6 +1065,9 @@ class CatalogImporterSimulateView(APIView):
         title_col = mapping.get("title")
         author_col = mapping.get("author")
         isbn_col = mapping.get("isbn")
+        editorial_col = mapping.get("editorial")
+        year_col = mapping.get("year")
+        genre_col = mapping.get("genre")
 
         if not title_col or not author_col:
             return Response(
@@ -897,12 +1081,12 @@ class CatalogImporterSimulateView(APIView):
         errors = []
         preview_items = []
 
-        # Catálogo de ISBNs y títulos existentes en memoria para comparación rápida
+        # Catálogo de ISBNs y títulos existentes en memoria para comparación rápida (incluye duplicados del mismo archivo)
         existing_isbns = set(
-            Book.objects.filter(deleted_at__isnull=True).values_list("isbn", flat=True)
+            isbn for isbn in Book.objects.filter(deleted_at__isnull=True).values_list("isbn", flat=True) if isbn
         )
-        existing_titles = set(
-            Book.objects.filter(deleted_at__isnull=True).values_list("title", flat=True)
+        existing_titles_lower = set(
+            t[:45].lower() for t in Book.objects.filter(deleted_at__isnull=True).values_list("title", flat=True) if t
         )
 
         for idx, row in enumerate(rows, start=2): # Comienza en 2 contando la cabecera
@@ -915,9 +1099,11 @@ class CatalogImporterSimulateView(APIView):
                 continue
 
             if not title_val:
+                reason_msg = "La fila contiene datos pero no tiene título especificado."
                 errors.append({
                     "row": idx,
-                    "reason": "La fila contiene datos pero no tiene título especificado.",
+                    "reason": reason_msg,
+                    "error": reason_msg,
                     "data": row,
                 })
                 continue
@@ -927,33 +1113,63 @@ class CatalogImporterSimulateView(APIView):
 
             valid_rows += 1
 
+            clean_title_lower = title_val[:45].lower()
             is_existing = False
             if isbn_val and isbn_val in existing_isbns:
                 is_existing = True
-            elif title_val.lower() in [t.lower() for t in existing_titles]:
+            elif clean_title_lower in existing_titles_lower:
                 is_existing = True
 
             if is_existing:
                 existing_books_count += 1
             else:
                 new_books_count += 1
+                if isbn_val:
+                    existing_isbns.add(isbn_val)
+                existing_titles_lower.add(clean_title_lower)
 
-            if len(preview_items) < 5:
+            if len(preview_items) < 6:
+                parsed_authors = split_and_clean_authors(author_val, options["author_format"])
+                authors_display_list = [
+                    f"{fn} {ln}".strip() if ln != "-" else fn
+                    for fn, ln in parsed_authors
+                ]
+                raw_genre_val = _clean_str(row.get(genre_col, "")) if genre_col else ""
+                parsed_genres = split_and_clean_genres(raw_genre_val, options["genre_separator"])
+
+                ed_val = _clean_str(row.get(editorial_col, "")) if editorial_col else ""
+                year_val = ""
+                if year_col and row.get(year_col):
+                    m_y = re.search(r"\b(1\d{3}|20\d{2})\b", _clean_str(row[year_col]))
+                    if m_y:
+                        year_val = m_y.group(1)
+
                 preview_items.append({
                     "row": idx,
                     "title": title_val[:45],
-                    "author": author_val,
-                    "isbn": isbn_val or "Sin ISBN",
+                    "author": ", ".join(authors_display_list),
+                    "authors_list": authors_display_list,
+                    "genres_list": parsed_genres,
+                    "isbn": isbn_val or "",
+                    "editorial": ed_val[:150] if ed_val else "",
+                    "year": year_val,
+                    "status": "EXISTING" if is_existing else "NEW",
                     "status_simulated": "Existente (añadirá copia)" if is_existing else "Nuevo libro",
                 })
 
         return Response({
+            "success": True,
             "total_rows": len(rows),
             "valid_rows": valid_rows,
+            "new_books": new_books_count,
             "new_books_count": new_books_count,
+            "existing_books": existing_books_count,
             "existing_books_count": existing_books_count,
+            "rows_with_errors": len(errors),
             "errors_count": len(errors),
+            "error_details": errors[:50],
             "errors": errors[:50], # Límite de 50 para no sobrecargar el payload
+            "sample_previews": preview_items,
             "preview_items": preview_items,
         }, status=status.HTTP_200_OK)
 
@@ -970,6 +1186,7 @@ class CatalogImporterExecuteView(APIView):
     def post(self, request, *args, **kwargs):
         uploaded_file = request.FILES.get("file")
         mapping_raw = request.data.get("mapping", "{}")
+        options_raw = request.data.get("options", "{}")
 
         if not uploaded_file:
             return Response(
@@ -984,6 +1201,8 @@ class CatalogImporterExecuteView(APIView):
                 {"detail": "El mapa de campos recibido no tiene un formato JSON válido."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        options = parse_importer_options(options_raw)
 
         try:
             _, rows = parse_uploaded_file(uploaded_file)
@@ -1012,10 +1231,6 @@ class CatalogImporterExecuteView(APIView):
         imported_books = 0
         imported_items = 0
         skipped_count = 0
-        execution_errors = []
-
-        # Generador de códigos únicos para ítems e ISBNs sintéticos
-        base_timestamp = int(timezone.now().timestamp())
         synthetic_counter = 1
 
         with transaction.atomic():
@@ -1034,10 +1249,12 @@ class CatalogImporterExecuteView(APIView):
                 if not author_val:
                     author_val = "Autor no especificado"
 
-                # 1. Editorial
+                # 1. Editorial (búsqueda case-insensitive antes de crear)
                 ed_name = _clean_str(row.get(editorial_col, "")) if editorial_col else ""
                 ed_name = ed_name[:150] if ed_name else "Editorial Independiente"
-                editorial_obj, _ = Editorial.objects.get_or_create(name=ed_name)
+                editorial_obj = Editorial.objects.filter(name__iexact=ed_name).first()
+                if not editorial_obj:
+                    editorial_obj = Editorial.objects.create(name=ed_name)
 
                 # 2. ISBN y Desduplicación de Book
                 isbn_val = _clean_isbn(row.get(isbn_col, "")) if isbn_col else None
@@ -1047,7 +1264,6 @@ class CatalogImporterExecuteView(APIView):
                     book_obj = Book.objects.filter(isbn=isbn_val, deleted_at__isnull=True).first()
 
                 if not book_obj:
-                    # Intenta buscar por Título y primer Autor
                     clean_title = title_val[:45]
                     candidate = Book.objects.filter(
                         title__iexact=clean_title,
@@ -1058,7 +1274,6 @@ class CatalogImporterExecuteView(APIView):
 
                 # Si el libro no existe, lo creamos
                 if not book_obj:
-                    # Año de publicación (el ISBN queda None si no está presente en el archivo)
                     year_val = None
                     if year_col and row.get(year_col):
                         match_year = re.search(r"\b(1\d{3}|20\d{2})\b", _clean_str(row[year_col]))
@@ -1076,31 +1291,29 @@ class CatalogImporterExecuteView(APIView):
                     )
                     imported_books += 1
 
-                    # 3. Autores
-                    # Divide si vienen múltiples autores separados por coma o punto y coma
-                    authors_list = [a.strip() for a in re.split(r"[,;]+", author_val) if a.strip()]
-                    if not authors_list:
-                        authors_list = [author_val]
-
-                    for single_author in authors_list[:3]: # Limita a los primeros 3 autores
-                        parts = single_author.split()
-                        if len(parts) >= 2:
-                            first_name = _sanitize_name_text(parts[0], 45, "Autor")
-                            last_name = _sanitize_name_text(" ".join(parts[1:]), 45, "-")
-                        else:
-                            first_name = _sanitize_name_text(single_author, 45, "Autor")
-                            last_name = "-"
-
-                        author_obj, _ = Author.objects.get_or_create(
-                            name=first_name,
-                            last_name=last_name,
-                        )
+                    # 3. Autores (separación inteligente + búsqueda case-insensitive)
+                    parsed_authors = split_and_clean_authors(author_val, options["author_format"])
+                    for first_name, last_name in parsed_authors:
+                        author_obj = Author.objects.filter(
+                            name__iexact=first_name,
+                            last_name__iexact=last_name,
+                        ).first()
+                        if not author_obj:
+                            author_obj = Author.objects.create(
+                                name=first_name,
+                                last_name=last_name,
+                            )
                         book_obj.authors.add(author_obj)
 
-                    # 4. Género
-                    genre_name = _clean_str(row.get(genre_col, "")) if genre_col else ""
-                    genre_name = genre_name[:100] if genre_name else "General"
-                    genre_obj, _ = Genre.objects.get_or_create(name=genre_name)
+                # 4. Géneros (división en géneros individuales + búsqueda case-insensitive)
+                raw_genre_val = _clean_str(row.get(genre_col, "")) if genre_col else ""
+                parsed_genres = split_and_clean_genres(raw_genre_val, options["genre_separator"])
+                for g_name in parsed_genres:
+                    if g_name == "General" and book_obj.genres.exists():
+                        continue
+                    genre_obj = Genre.objects.filter(name__iexact=g_name).first()
+                    if not genre_obj:
+                        genre_obj = Genre.objects.create(name=g_name)
                     book_obj.genres.add(genre_obj)
 
                 # 5. Creación de la copia física (Item)
