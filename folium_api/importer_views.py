@@ -3,15 +3,28 @@ import io
 import json
 import random
 import re
+import urllib.error
+import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from django.conf import settings
+from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
-from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
-from django.utils import timezone
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from .models import Book, Item, Author, Genre, Editorial, User
+
+SEED_COVERS_DIR = Path(__file__).resolve().parent / "seed_assets" / "covers"
+COVER_EXTENSIONS = (".webp", ".jpg", ".jpeg", ".png")
+COVER_HTTP_HEADERS = {
+    "User-Agent": "FoliumLibraryCatalog/1.0 (+https://folium.library)",
+    "Accept": "image/webp,image/jpeg,image/png,image/*,*/*;q=0.8",
+}
 
 
 class IsLibrarianOrAdminUser(permissions.BasePermission):
@@ -56,6 +69,7 @@ def parse_importer_options(options_raw):
     default_opts = {
         "genre_separator": "auto",
         "author_format": "auto",
+        "fetch_covers_by_isbn": False,
         "seen_isbns": [],
         "seen_titles": [],
     }
@@ -67,12 +81,201 @@ def parse_importer_options(options_raw):
             return {
                 "genre_separator": parsed.get("genre_separator") or "auto",
                 "author_format": parsed.get("author_format") or "auto",
+                "fetch_covers_by_isbn": bool(parsed.get("fetch_covers_by_isbn", False)),
                 "seen_isbns": parsed.get("seen_isbns") if isinstance(parsed.get("seen_isbns"), list) else [],
                 "seen_titles": parsed.get("seen_titles") if isinstance(parsed.get("seen_titles"), list) else [],
             }
     except Exception:
         pass
     return default_opts
+
+
+def _detect_image_extension(img_bytes):
+    if not img_bytes or len(img_bytes) < 500:
+        return None
+    if img_bytes.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if img_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if len(img_bytes) >= 12 and img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+        return ".webp"
+    if img_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    return None
+
+
+def find_local_cover_for_isbn(isbn):
+    """
+    Nivel 1 de búsqueda de portada por ISBN:
+    Verifica sin usar red si ya existe una imagen local para el ISBN en:
+    1) MEDIA_ROOT/books/covers/<isbn>.(webp|jpg|jpeg|png)
+    2) folium_api/seed_assets/covers/<isbn>.(webp|jpg|jpeg|png)
+    """
+    clean = _clean_isbn(isbn)
+    if not clean:
+        return None
+
+    media_covers_dir = Path(settings.MEDIA_ROOT) / "books" / "covers"
+    for ext in COVER_EXTENSIONS:
+        candidate = media_covers_dir / f"{clean}{ext}"
+        try:
+            if candidate.exists() and candidate.stat().st_size > 500:
+                return ("media", f"books/covers/{clean}{ext}", candidate)
+        except OSError:
+            continue
+
+    for ext in COVER_EXTENSIONS:
+        candidate = SEED_COVERS_DIR / f"{clean}{ext}"
+        try:
+            if candidate.exists() and candidate.stat().st_size > 500:
+                return ("seed", f"books/covers/{clean}{ext}", candidate)
+        except OSError:
+            continue
+
+    return None
+
+
+def assign_local_cover_to_book(book_obj, isbn):
+    """
+    Si existe una portada en caché local o en seed_assets para el ISBN dado,
+    asegura que el archivo esté en MEDIA_ROOT/books/covers/ y lo vincula al libro.
+    """
+    found = find_local_cover_for_isbn(isbn)
+    if not found:
+        return False
+
+    source_type, rel_media_path, src_path = found
+    media_target = Path(settings.MEDIA_ROOT) / rel_media_path
+    try:
+        if source_type == "seed" and not media_target.exists():
+            media_target.parent.mkdir(parents=True, exist_ok=True)
+            media_target.write_bytes(src_path.read_bytes())
+        book_obj.cover_image.name = rel_media_path
+        book_obj.save(update_fields=["cover_image"])
+        return True
+    except Exception:
+        return False
+
+
+def _http_get_bytes(url, timeout=3.5):
+    try:
+        req = urllib.request.Request(url, headers=COVER_HTTP_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) == 200:
+                return resp.read(2 * 1024 * 1024)  # Límite defensivo de 2 MB por portada
+    except Exception:
+        return None
+    return None
+
+
+def fetch_openlibrary_batch_urls(isbns, timeout=3.5):
+    """
+    Consulta en una sola petición HTTP hasta 25 ISBNs en la API de libros de Open Library
+    para obtener las URLs de portada existentes sin hacer llamadas fallidas innecesarias.
+    """
+    if not isbns:
+        return {}
+    bibkeys = ",".join(f"ISBN:{isbn}" for isbn in isbns)
+    url = f"https://openlibrary.org/api/books?bibkeys={bibkeys}&format=json&jscmd=data"
+    raw = _http_get_bytes(url, timeout=timeout)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="ignore"))
+        result = {}
+        for isbn in isbns:
+            entry = payload.get(f"ISBN:{isbn}") or {}
+            cover = entry.get("cover") or {}
+            cover_url = cover.get("large") or cover.get("medium")
+            if cover_url and isinstance(cover_url, str):
+                result[isbn] = cover_url
+        return result
+    except Exception:
+        return {}
+
+
+def download_remote_cover_for_isbn(isbn, ol_cover_url=None, timeout=3.5):
+    """
+    Niveles 2 y 3 de búsqueda de portada por ISBN:
+    - Nivel 2: Open Library Covers API (?default=false evita píxeles transparentes 1x1).
+    - Nivel 3: Google Books API (fallback ideal para ediciones en español/latinoamericanas).
+    Devuelve (img_bytes, ext, provider_name) o None.
+    """
+    clean = _clean_isbn(isbn)
+    if not clean:
+        return None
+
+    # Nivel 2: Open Library
+    ol_urls = []
+    if ol_cover_url:
+        ol_urls.append(ol_cover_url)
+    ol_urls.append(f"https://covers.openlibrary.org/b/isbn/{clean}-L.jpg?default=false")
+
+    for url in ol_urls:
+        img_bytes = _http_get_bytes(url, timeout=timeout)
+        ext = _detect_image_extension(img_bytes)
+        if ext:
+            return (img_bytes, ext, "openlibrary")
+
+    # Nivel 3: Google Books API
+    gb_api_url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{clean}&maxResults=1"
+    gb_raw = _http_get_bytes(gb_api_url, timeout=timeout)
+    if gb_raw:
+        try:
+            gb_data = json.loads(gb_raw.decode("utf-8", errors="ignore"))
+            items = gb_data.get("items") or []
+            if items:
+                vol_info = items[0].get("volumeInfo") or {}
+                img_links = vol_info.get("imageLinks") or {}
+                thumb_url = img_links.get("thumbnail") or img_links.get("smallThumbnail")
+                if thumb_url and isinstance(thumb_url, str):
+                    thumb_url = re.sub(r"^http://", "https://", thumb_url)
+                    thumb_url = thumb_url.replace("&edge=curl", "")
+                    img_bytes = _http_get_bytes(thumb_url, timeout=timeout)
+                    ext = _detect_image_extension(img_bytes)
+                    if ext:
+                        return (img_bytes, ext, "google_books")
+        except Exception:
+            pass
+
+    return None
+
+
+def resolve_and_save_cover_for_isbn(isbn, ol_cover_url=None, timeout=3.5):
+    """
+    Resuelve la portada de un ISBN (Nivel 1 Local -> Nivel 2 Open Library -> Nivel 3 Google Books),
+    guarda el archivo una única vez en MEDIA_ROOT/books/covers/<isbn>.<ext> y devuelve
+    (provider, rel_media_path) o (None, None).
+    """
+    clean = _clean_isbn(isbn)
+    if not clean:
+        return (None, None)
+
+    local = find_local_cover_for_isbn(clean)
+    if local:
+        source_type, rel_media_path, src_path = local
+        media_target = Path(settings.MEDIA_ROOT) / rel_media_path
+        try:
+            if source_type == "seed" and not media_target.exists():
+                media_target.parent.mkdir(parents=True, exist_ok=True)
+                media_target.write_bytes(src_path.read_bytes())
+            return ("local", rel_media_path)
+        except Exception:
+            pass
+
+    remote = download_remote_cover_for_isbn(clean, ol_cover_url=ol_cover_url, timeout=timeout)
+    if remote:
+        img_bytes, ext, provider = remote
+        rel_media_path = f"books/covers/{clean}{ext}"
+        media_target = Path(settings.MEDIA_ROOT) / rel_media_path
+        try:
+            media_target.parent.mkdir(parents=True, exist_ok=True)
+            media_target.write_bytes(img_bytes)
+            return (provider, rel_media_path)
+        except Exception:
+            return (None, None)
+
+    return (None, None)
 
 
 def split_and_clean_genres(raw_genre, separator_mode="auto"):
@@ -1163,6 +1366,7 @@ class CatalogImporterSimulateView(APIView):
                     "authors_list": authors_display_list,
                     "genres_list": parsed_genres,
                     "isbn": isbn_val or "",
+                    "has_local_cover": bool(isbn_val and find_local_cover_for_isbn(isbn_val)),
                     "editorial": ed_val[:150] if ed_val else "",
                     "year": year_val,
                     "status": "EXISTING" if is_existing else "NEW",
@@ -1246,6 +1450,10 @@ class CatalogImporterExecuteView(APIView):
         imported_items = 0
         skipped_count = 0
         synthetic_counter = 1
+        covers_assigned = 0
+        pending_cover_isbns = []
+        pending_cover_isbns_set = set()
+        fetch_covers = bool(options.get("fetch_covers_by_isbn", False))
 
         with transaction.atomic():
             for idx, row in enumerate(rows, start=2):
@@ -1319,6 +1527,15 @@ class CatalogImporterExecuteView(APIView):
                             )
                         book_obj.authors.add(author_obj)
 
+                # Si el bibliotecario eligió buscar portadas por ISBN y el libro no tiene portada aún
+                effective_isbn = isbn_val or _clean_isbn(book_obj.isbn)
+                if fetch_covers and effective_isbn and not book_obj.cover_image:
+                    if assign_local_cover_to_book(book_obj, effective_isbn):
+                        covers_assigned += 1
+                    elif effective_isbn not in pending_cover_isbns_set:
+                        pending_cover_isbns_set.add(effective_isbn)
+                        pending_cover_isbns.append(effective_isbn)
+
                 # 4. Géneros (división en géneros individuales + búsqueda case-insensitive)
                 raw_genre_val = _clean_str(row.get(genre_col, "")) if genre_col else ""
                 parsed_genres = split_and_clean_genres(raw_genre_val, options["genre_separator"])
@@ -1357,5 +1574,104 @@ class CatalogImporterExecuteView(APIView):
             "imported_books": imported_books,
             "imported_items": imported_items,
             "skipped_rows": skipped_count,
+            "covers_assigned": covers_assigned,
+            "pending_cover_isbns": pending_cover_isbns,
             "message": f"Se importaron con éxito {imported_books} obras y {imported_items} ejemplares físicos.",
         }, status=status.HTTP_201_CREATED)
+
+
+class CatalogImporterFetchCoversView(APIView):
+    """
+    POST /api/v1/importer/fetch-covers/
+    Recibe una micro-tanda de ISBNs (hasta 25 por petición) y busca sus portadas en cascada:
+    1) Caché local (MEDIA_ROOT/books/covers/ y seed_assets/covers/)
+    2) Open Library Books & Covers API
+    3) Google Books API
+    Guarda las portadas encontradas y las asocia a las obras correspondientes sin portada.
+    """
+    permission_classes = [IsLibrarianOrAdminUser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def post(self, request, *args, **kwargs):
+        raw_isbns = request.data.get("isbns", [])
+        if isinstance(raw_isbns, str):
+            try:
+                raw_isbns = json.loads(raw_isbns)
+            except Exception:
+                raw_isbns = [x.strip() for x in raw_isbns.split(",") if x.strip()]
+
+        if not isinstance(raw_isbns, list):
+            return Response(
+                {"detail": "El campo 'isbns' debe ser una lista de códigos ISBN."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        clean_isbns = []
+        seen = set()
+        for val in raw_isbns:
+            c = _clean_isbn(val)
+            if c and c not in seen:
+                seen.add(c)
+                clean_isbns.append(c)
+            if len(clean_isbns) >= 25:
+                break
+
+        if not clean_isbns:
+            return Response({
+                "success": True,
+                "processed": 0,
+                "found": 0,
+                "not_found": 0,
+                "sources": {},
+            }, status=status.HTTP_200_OK)
+
+        # Pre-consultar en lote a Open Library para los ISBNs que no estén ya en caché local
+        remote_candidates = [isbn for isbn in clean_isbns if not find_local_cover_for_isbn(isbn)]
+        ol_batch_urls = fetch_openlibrary_batch_urls(remote_candidates, timeout=3.5) if remote_candidates else {}
+
+        resolved_paths = {}
+        sources = {}
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            future_to_isbn = {
+                executor.submit(
+                    resolve_and_save_cover_for_isbn,
+                    isbn,
+                    ol_batch_urls.get(isbn),
+                    3.5,
+                ): isbn
+                for isbn in clean_isbns
+            }
+            for future in as_completed(future_to_isbn):
+                isbn = future_to_isbn[future]
+                try:
+                    provider, rel_path = future.result()
+                    if provider and rel_path:
+                        resolved_paths[isbn] = rel_path
+                        sources[isbn] = provider
+                    else:
+                        sources[isbn] = "not_found"
+                except Exception:
+                    sources[isbn] = "error"
+
+        updated_books = 0
+        for isbn, rel_path in resolved_paths.items():
+            books_to_update = Book.objects.filter(
+                isbn=isbn,
+                deleted_at__isnull=True,
+            ).filter(Q(cover_image__isnull=True) | Q(cover_image=""))
+            for book_obj in books_to_update:
+                book_obj.cover_image.name = rel_path
+                book_obj.save(update_fields=["cover_image"])
+                updated_books += 1
+
+        found_count = len(resolved_paths)
+        return Response({
+            "success": True,
+            "processed": len(clean_isbns),
+            "found": found_count,
+            "not_found": len(clean_isbns) - found_count,
+            "updated_books": updated_books,
+            "sources": sources,
+        }, status=status.HTTP_200_OK)
+
