@@ -26,20 +26,7 @@ COVER_HTTP_HEADERS = {
     "Accept": "image/webp,image/jpeg,image/png,image/*,*/*;q=0.8",
 }
 
-
-class IsLibrarianOrAdminUser(permissions.BasePermission):
-    """
-    Permiso que restringe el uso del importador exclusivamente
-    a usuarios con rol LIBRARIAN o ADMIN.
-    """
-    def has_permission(self, request, view):
-        if not (request.user and request.user.is_authenticated):
-            return False
-        return (
-            getattr(request.user, "rol", None) in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
-            or request.user.is_staff
-            or request.user.is_superuser
-        )
+from .permissions import IsLibrarianOrAdminUser
 
 
 def _clean_str(val):

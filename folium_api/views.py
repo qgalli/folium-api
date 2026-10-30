@@ -7,9 +7,15 @@ from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
 import random
-from django.db.models import Avg, Count, Q, F
+from django.db.models import Avg, Count, Q, F, Value
+from django.db.models.functions import Concat
 from .models import *
 from .serializers import *
+from .permissions import (
+        is_librarian_or_admin,
+        IsLibrarianOrReadOnly,
+        IsLibrarianOrPublicReadOnly,
+)
 
 # Create your views here.
 
@@ -41,60 +47,90 @@ class FoliumTokenObtainPairView(TokenObtainPairView):
         throttle_classes = [LoginRateThrottle]
 
 
-class IsLibrarian(permissions.BasePermission):
-        """
-        Permiso que autoriza únicamente a usuarios autenticados 
-        cuyo rol sea Bibliotecario (LIBRARIAN) o Administrador (ADMIN).
-        """
-        def has_permission(self, request, view):
-        # 1. Primero verifica que el usuario haya iniciado sesión
-                if not (request.user and request.user.is_authenticated):
-                        return False
-
-        # 2. Verifica si el rol es LIBRARIAN o ADMIN (o superusuario)
-                return (
-                        request.user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN] 
-                        or request.user.is_staff 
-                        or request.user.is_superuser
-                )
-
-
-class IsLibrarianOrReadOnly(permissions.BasePermission):
-        """
-        Permiso que permite lectura (GET, HEAD, OPTIONS) a cualquier usuario autenticado
-        (incluyendo lectores), pero restringe la creación, edición y eliminación
-        exclusivamente a Bibliotecarios (LIBRARIAN) o Administradores (ADMIN).
-        """
-        def has_permission(self, request, view):
-                # 1. Verifica que el usuario haya iniciado sesión
-                if not (request.user and request.user.is_authenticated):
-                        return False
-
-                # 2. Si es una acción de solo lectura (catálogo), cualquier usuario autenticado puede acceder
-                if request.method in permissions.SAFE_METHODS:
-                        return True
-
-                # 3. Acciones de escritura sólo permitidas para LIBRARIAN o ADMIN
-                return (
-                        request.user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
-                        or request.user.is_staff
-                        or request.user.is_superuser
-                )
 
 
 # ==========================================
 # VIEWSETS
 # ==========================================
 
+class ItemPagination(pagination.PageNumberPagination):
+        page_size = 50                       # 50 ejemplares por página
+        page_size_query_param = 'page_size' 
+        max_page_size = 100
+
+
 class ItemViewSet(viewsets.ModelViewSet):
         """
         Controlador para que el bibliotecario gestione el inventario 
         de ejemplares físicos (copias de los libros).
         """
-        queryset = Item.objects.select_related('book')
+        queryset = Item.objects.select_related(
+                'book',
+                'book__editorial'
+        ).prefetch_related(
+                'book__authors',
+                'book__genres',
+                'book__items',
+                'book__reservations',
+        )
         serializer_class = ItemSerializer
         permission_classes = [IsLibrarianOrReadOnly]
+        pagination_class = ItemPagination
 
+        def get_queryset(self):
+                qs = Item.objects.select_related(
+                        'book',
+                        'book__editorial'
+                ).prefetch_related(
+                        'book__authors',
+                        'book__genres',
+                        'book__items',
+                        'book__reservations',
+                )
+
+                search = self.request.query_params.get('search') or self.request.query_params.get('q')
+                status_param = self.request.query_params.get('status')
+                ordering = self.request.query_params.get('ordering')
+
+                if status_param:
+                        qs = qs.filter(status=status_param)
+
+                if search:
+                        search = search.strip()
+                        qs = qs.annotate(
+                                author_full_name=Concat(
+                                        F('book__authors__name'),
+                                        Value(' '),
+                                        F('book__authors__last_name')
+                                )
+                        ).filter(
+                                Q(inventory_code__icontains=search) |
+                                Q(location__icontains=search) |
+                                Q(book__title__icontains=search) |
+                                Q(book__isbn__icontains=search) |
+                                Q(book__authors__name__icontains=search) |
+                                Q(book__authors__last_name__icontains=search) |
+                                Q(author_full_name__icontains=search)
+                        )
+
+                if ordering:
+                        valid_orderings = [
+                                'inventory_code', '-inventory_code',
+                                'created_at', '-created_at',
+                                'status', '-status',
+                                'location', '-location'
+                        ]
+                        if ordering in valid_orderings:
+                                qs = qs.order_by(ordering)
+                else:
+                        qs = qs.order_by('-created_at')
+
+                return qs.distinct()
+
+        def get_serializer_class(self):
+                if self.action in ['list', 'retrieve']:
+                        return ItemReadSerializer
+                return ItemSerializer
 
 class LoanViewSet(viewsets.ModelViewSet):
         """
@@ -109,11 +145,7 @@ class LoanViewSet(viewsets.ModelViewSet):
                 user = self.request.user
                 base_qs = Loan.objects.select_related('item__book__editorial', 'user')
                 # Bibliotecarios y administradores pueden ver todos los préstamos
-                if user.is_authenticated and (
-                        user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
-                        or user.is_staff
-                        or user.is_superuser
-                ):
+                if is_librarian_or_admin(user):
                         return base_qs.all()
                 # Lectores únicamente pueden ver sus propios préstamos
                 if user.is_authenticated:
@@ -138,7 +170,7 @@ class BookViewSet(viewsets.ModelViewSet):
         """
         queryset = Book.objects.select_related('editorial').prefetch_related('authors', 'genres')
         serializer_class = BookWriteSerializer
-        permission_classes = [IsLibrarianOrReadOnly]
+        permission_classes = [IsLibrarianOrPublicReadOnly]
         pagination_class = BookPagination
 
         def get_queryset(self):
@@ -148,16 +180,26 @@ class BookViewSet(viewsets.ModelViewSet):
 
                 genre = self.request.query_params.get('genre')
                 year = self.request.query_params.get('year')
-                search = self.request.query_params.get('search')
+                search = self.request.query_params.get('search') or self.request.query_params.get('q')
 
                 if genre:
                         qs = qs.filter(genres__name__icontains=genre)
                 if year:
                         qs = qs.filter(publication_year=year)
                 if search:
-                        qs = qs.filter(
+                        search = search.strip()
+                        qs = qs.annotate(
+                                author_full_name=Concat(
+                                        F('authors__name'),
+                                        Value(' '),
+                                        F('authors__last_name')
+                                )
+                        ).filter(
                                 Q(title__icontains=search) |
-                                Q(authors__name__icontains=search)
+                                Q(isbn__icontains=search) |
+                                Q(authors__name__icontains=search) |
+                                Q(authors__last_name__icontains=search) |
+                                Q(author_full_name__icontains=search)
                         )
 
                 # distinct() evita libros duplicados cuando hay múltiples autores/géneros
@@ -191,27 +233,85 @@ class BookViewSet(viewsets.ModelViewSet):
                 """
                 return BookRecommendationView.as_view()(request._request, *args, **kwargs)
 
+        @action(detail=False, methods=['get'], permission_classes=[IsLibrarianOrReadOnly], url_path='options')
+        def options(self, request, *args, **kwargs):
+                """
+                Endpoint liviano sin paginación (máximo 50 resultados) para alimentar
+                selectores y buscadores en formularios (ItemForm, ItemEditModal).
+                Soporta búsqueda por texto con ?search= o ?q=.
+                """
+                qs = Book.objects.all()
+                search = request.query_params.get('search') or request.query_params.get('q')
 
+                if search:
+                        search = search.strip()
+                        qs = qs.annotate(
+                                author_full_name=Concat(
+                                        F('authors__name'),
+                                        Value(' '),
+                                        F('authors__last_name')
+                                )
+                        ).filter(
+                                Q(title__icontains=search) |
+                                Q(isbn__icontains=search) |
+                                Q(authors__name__icontains=search) |
+                                Q(authors__last_name__icontains=search) |
+                                Q(author_full_name__icontains=search)
+                        ).distinct()
+
+                qs = qs.only('id', 'title', 'isbn').order_by('title')[:50]
+                serializer = BookOptionSerializer(qs, many=True)
+                return Response(serializer.data)
 
 
 class AuthorViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar autores.
-        Permite lectura a lectores y gestión completa al bibliotecario.
+        Permite lectura a cualquier usuario (lectura pública) y gestión completa al bibliotecario.
+        Sin paginación por defecto para nutrir selectores de formularios.
+        Soporta búsqueda por texto con ?search= o ?q=.
         """
         queryset = Author.objects.all()
         serializer_class = AuthorSerializer
-        permission_classes = [IsLibrarianOrReadOnly]
+        permission_classes = [IsLibrarianOrPublicReadOnly]
+
+        def get_queryset(self):
+                qs = Author.objects.all()
+                search = self.request.query_params.get('search') or self.request.query_params.get('q')
+                if search:
+                        search = search.strip()
+                        qs = qs.annotate(
+                                full_name=Concat(
+                                        F('name'),
+                                        Value(' '),
+                                        F('last_name')
+                                )
+                        ).filter(
+                                Q(name__icontains=search) |
+                                Q(last_name__icontains=search) |
+                                Q(full_name__icontains=search)
+                        )
+                return qs
 
 
 class GenreViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar géneros.
-        Permite lectura a lectores y gestión completa al bibliotecario.
+        Permite lectura a cualquier usuario (lectura pública) y gestión completa al bibliotecario.
+        Sin paginación por defecto para nutrir checkboxes y selectores de formularios.
+        Soporta búsqueda por texto con ?search= o ?q=.
         """
         queryset = Genre.objects.all()
         serializer_class = GenreSerializer
-        permission_classes = [IsLibrarianOrReadOnly]
+        permission_classes = [IsLibrarianOrPublicReadOnly]
+
+        def get_queryset(self):
+                qs = Genre.objects.all()
+                search = self.request.query_params.get('search') or self.request.query_params.get('q')
+                if search:
+                        search = search.strip()
+                        qs = qs.filter(name__icontains=search)
+                return qs
 
 class FavoriteViewSet(viewsets.ModelViewSet):
         """
@@ -271,11 +371,7 @@ class ReservationViewSet(viewsets.ModelViewSet):
                 user = self.request.user
                 base_qs = Reservation.objects.select_related('book__editorial', 'user')
                 # Bibliotecarios y administradores pueden ver y gestionar todas las reservas
-                if user.is_authenticated and (
-                        user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
-                        or user.is_staff
-                        or user.is_superuser
-                ):
+                if is_librarian_or_admin(user):
                         return base_qs.all()
                 # Un lector solo ve sus propias reservas
                 if user.is_authenticated:
@@ -302,11 +398,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
         def get_queryset(self):
                 queryset = Review.objects.filter(deleted_at__isnull=True).select_related('book__editorial', 'user')
                 user = self.request.user
-                is_moderator = user.is_authenticated and (
-                        user.rol in [User.Rol.LIBRARIAN, User.Rol.ADMIN]
-                        or user.is_staff
-                        or user.is_superuser
-                )
+                is_moderator = is_librarian_or_admin(user)
 
                 # Eliminación permitida a bibliotecarios/admin (moderación) o al propio autor
                 if self.action == 'destroy':
