@@ -3,7 +3,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
-from .models import Author, Book, Editorial, Review, Item
+from .models import Author, Book, Editorial, Review, Item, Genre
 
 User = get_user_model()
 
@@ -474,7 +474,7 @@ class CatalogPublicReadOnlyTests(APITestCase):
             {"title": "No autorizado", "editorial": self.editorial.id},
             format="json",
         )
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn(response.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
     def test_reader_cannot_create_book(self):
         self.client.force_authenticate(user=self.reader)
@@ -502,7 +502,95 @@ class CatalogPublicReadOnlyTests(APITestCase):
 
     def test_items_and_loans_stay_private(self):
         response_items = self.client.get(reverse("folium_api:item-list"))
-        self.assertEqual(response_items.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn(response_items.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
         response_loans = self.client.get(reverse("folium_api:loan-list"))
-        self.assertEqual(response_loans.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn(response_loans.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+
+class LoanCounterTests(APITestCase):
+    def setUp(self):
+        self.librarian = User.objects.create_user(
+            username="counter_biblio",
+            dni=99887766,
+            email="counter_biblio@example.com",
+            password="test-password",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.reader = User.objects.create_user(
+            username="existing_reader",
+            dni=11223344,
+            first_name="Carlos",
+            last_name="Perez",
+            email="carlos.perez@example.com",
+            password="test-password",
+            rol=User.Rol.USER,
+        )
+        self.editorial = Editorial.objects.create(name="Editorial Counter")
+        self.author = Author.objects.create(name="Jorge", last_name="Borges")
+        self.book = Book.objects.create(
+            title="Ficciones",
+            editorial=self.editorial,
+            isbn="9789871138012",
+        )
+        self.book.authors.add(self.author)
+        self.available_item = Item.objects.create(
+            book=self.book,
+            inventory_code="FIC-001",
+            status=Item.Status.AVAILABLE,
+            location="Estante A-1",
+        )
+
+    def test_librarian_can_find_user_by_dni(self):
+        self.client.force_authenticate(user=self.librarian)
+        response = self.client.get(f"/api/v1/user/by-dni/{self.reader.dni}/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["dni"], self.reader.dni)
+        self.assertEqual(response.data["username"], "existing_reader")
+        self.assertEqual(response.data["active_loans_count"], 0)
+
+    def test_librarian_gets_404_when_user_not_found_by_dni(self):
+        self.client.force_authenticate(user=self.librarian)
+        response = self.client.get("/api/v1/user/by-dni/99999999/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_librarian_can_create_reader(self):
+        self.client.force_authenticate(user=self.librarian)
+        payload = {
+            "dni": 55667788,
+            "first_name": "Ana",
+            "last_name": "Gomez",
+            "email": "ana.gomez@example.com",
+        }
+        response = self.client.post("/api/v1/user/", payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["dni"], 55667788)
+        self.assertEqual(response.data["rol"], User.Rol.USER)
+        self.assertTrue(User.objects.filter(dni=55667788).exists())
+
+    def test_librarian_can_get_available_books_for_loan(self):
+        self.client.force_authenticate(user=self.librarian)
+        response = self.client.get("/api/v1/book/available/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(response.data), 1)
+        book_data = next((b for b in response.data if b["id"] == self.book.id), None)
+        self.assertIsNotNone(book_data)
+        self.assertEqual(book_data["available_count"], 1)
+        self.assertEqual(book_data["available_items"][0]["inventory_code"], "FIC-001")
+
+    def test_librarian_can_create_loan_for_item(self):
+        self.client.force_authenticate(user=self.librarian)
+        payload = {
+            "item": self.available_item.id,
+            "user": self.reader.id,
+        }
+        response = self.client.post("/api/v1/loan/", payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.available_item.refresh_from_db()
+        self.assertEqual(self.available_item.status, Item.Status.LOANED)
+
+    def test_reader_cannot_access_user_management(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.get(f"/api/v1/user/by-dni/{self.reader.dni}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
 

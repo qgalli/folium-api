@@ -148,6 +148,7 @@ class UserSerializer(serializers.ModelSerializer):
         required=False,
         min_length=8,
     )
+    full_name = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = User
@@ -157,6 +158,7 @@ class UserSerializer(serializers.ModelSerializer):
             "dni",
             "first_name",
             "last_name",
+            "full_name",
             "email",
             "rol",
             "password",
@@ -169,6 +171,10 @@ class UserSerializer(serializers.ModelSerializer):
             "date_joined",
             "updated_at",
         ]
+
+    def get_full_name(self, obj):
+        name = obj.get_full_name()
+        return name if name and name.strip() else obj.username
 
     def validate_dni(self, value):
         if value is None:
@@ -419,6 +425,39 @@ class BookSimpleSerializer(serializers.ModelSerializer):
             "editorial",
             "cover_image",
         ]
+
+
+class BookAvailableOptionSerializer(serializers.ModelSerializer):
+    """
+    Serializador de libros que tienen ejemplares físicos disponibles,
+    con el detalle de sus ítems para selección directa en el mostrador de préstamos.
+    """
+    editorial = EditorialSummarySerializer(read_only=True)
+    authors = AuthorSummarySerializer(many=True, read_only=True)
+    genres = GenreSummarySerializer(many=True, read_only=True)
+    available_items = serializers.SerializerMethodField()
+    available_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Book
+        fields = [
+            "id",
+            "title",
+            "isbn",
+            "editorial",
+            "publication_year",
+            "cover_image",
+            "authors",
+            "genres",
+            "available_items",
+            "available_count",
+        ]
+    def get_available_items(self, obj):
+        items = obj.items.filter(status=Item.Status.AVAILABLE)
+        return ItemSummarySerializer(items, many=True).data
+
+    def get_available_count(self, obj):
+        return obj.items.filter(status=Item.Status.AVAILABLE).count()
 
 
 class BookWriteSerializer(serializers.ModelSerializer):
@@ -679,7 +718,19 @@ class LoanWriteSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
         ]
+        extra_kwargs = {
+            "loaned_at": {"required": False},
+            "due_at": {"required": False},
+        }
+
     def validate(self, attrs):
+        from datetime import timedelta
+        # Asignar valores por defecto para préstamos nuevos
+        if not attrs.get("loaned_at") and (not self.instance or not getattr(self.instance, "loaned_at", None)):
+            attrs["loaned_at"] = timezone.now()
+        if not attrs.get("due_at") and (not self.instance or not getattr(self.instance, "due_at", None)):
+            attrs["due_at"] = attrs["loaned_at"] + timedelta(days=14)
+
         loaned_at = attrs.get("loaned_at", getattr(self.instance, "loaned_at", None))
         due_at = attrs.get("due_at", getattr(self.instance, "due_at", None))
         returned_at = attrs.get("returned_at", getattr(self.instance, "returned_at", None))

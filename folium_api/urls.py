@@ -36,6 +36,10 @@ router.register(r'reservations', views.ReservationViewSet, basename='reservation
 # Registro del ViewSet de Reseñas (Lector)
 router.register(r'reviews', views.ReviewViewSet, basename='review')
 
+# Registro del ViewSet de Usuarios (Bibliotecarios / Admin)
+router.register(r'user', views.UserViewSet, basename='user')
+router.register(r'users', views.UserViewSet, basename='users')
+
 urlpatterns = [
     # Ruta pública de autoregistro
     path('register/', views.ReaderRegistrationView.as_view(), name='reader-register'),
