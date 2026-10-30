@@ -419,3 +419,90 @@ class MarcImporterTests(APITestCase):
 		self.assertEqual(book["genre"], "Novela experimental")
 		self.assertEqual(book["inventory_code"], "INV-CORTAZAR-01")
 		self.assertEqual(book["location"], "Sala A - Estante 2")
+
+class CatalogPublicReadOnlyTests(APITestCase):
+    """
+    Pruebas de que la lectura del catálogo es pública y no requiere sesión.
+    """
+
+    def setUp(self):
+        self.editorial = Editorial.objects.create(name="Editorial Test")
+        self.author = Author.objects.create(name="Test", last_name="Autor")
+        self.genre = Genre.objects.create(name="Test Genre")
+        self.book = Book.objects.create(
+            title="Libro Público",
+            editorial=self.editorial,
+            isbn="9780000000001",
+            publication_year=2024,
+        )
+        self.book.authors.add(self.author)
+        self.book.genres.add(self.genre)
+        self.reader = User.objects.create_user(
+            username="reader-perm",
+            dni=99999991,
+            email="reader-perm@example.com",
+            password="test-password",
+            rol=User.Rol.USER,
+        )
+        self.librarian = User.objects.create_user(
+            username="librarian-perm",
+            dni=99999992,
+            email="librarian-perm@example.com",
+            password="test-password",
+            rol=User.Rol.LIBRARIAN,
+        )
+
+    def test_anon_can_list_books(self):
+        response = self.client.get(reverse("folium_api:book-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_anon_can_retrieve_book(self):
+        response = self.client.get(reverse("folium_api:book-detail", args=[self.book.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_anon_can_list_authors(self):
+        response = self.client.get(reverse("folium_api:author-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_anon_can_list_genres(self):
+        response = self.client.get(reverse("folium_api:genre-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_anon_cannot_create_book(self):
+        response = self.client.post(
+            reverse("folium_api:book-list"),
+            {"title": "No autorizado", "editorial": self.editorial.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_reader_cannot_create_book(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            reverse("folium_api:book-list"),
+            {"title": "No autorizado", "editorial": self.editorial.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_librarian_can_create_book(self):
+        self.client.force_authenticate(user=self.librarian)
+        response = self.client.post(
+            reverse("folium_api:book-list"),
+            {
+                "title": "Libro Bibliotecario",
+                "editorial": self.editorial.id,
+                "isbn": "9780000000002",
+                "authors": [self.author.id],
+                "genres": [self.genre.id],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_items_and_loans_stay_private(self):
+        response_items = self.client.get(reverse("folium_api:item-list"))
+        self.assertEqual(response_items.status_code, status.HTTP_403_FORBIDDEN)
+        response_loans = self.client.get(reverse("folium_api:loan-list"))
+        self.assertEqual(response_loans.status_code, status.HTTP_403_FORBIDDEN)
+

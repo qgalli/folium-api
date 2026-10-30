@@ -395,6 +395,19 @@ class ItemSummarySerializer(serializers.ModelSerializer):
 # ==========================================
 
 
+class BookOptionSerializer(serializers.ModelSerializer):
+    """
+    Serializador super liviano para selects / autocompletados (LoadBookForm, ItemForm).
+    """
+    class Meta:
+        model = Book
+        fields = [
+            "id",
+            "title",
+            "isbn",
+        ]
+
+
 class BookSimpleSerializer(serializers.ModelSerializer):
     editorial = EditorialSummarySerializer(read_only=True)
 
@@ -490,6 +503,37 @@ class BookListSerializer(serializers.ModelSerializer):
 
     def get_is_available(self, obj):
         return self.get_available_items(obj) > 0
+
+
+class ItemReadSerializer(serializers.ModelSerializer):
+    """
+    Serializador de lectura para Item (usado en GET list y retrieve).
+    Anida la información del libro (título, autores, géneros, portada, isbn)
+    para que el catálogo de ejemplares no requiera peticiones extras.
+    """
+    book = BookListSerializer(read_only=True)
+    status_display = serializers.CharField(
+        source="get_status_display",
+        read_only=True,
+    )
+
+    class Meta:
+        model = Item
+        fields = [
+            "id",
+            "book",
+            "inventory_code",
+            "status",
+            "status_display",
+            "location",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class BookDetailSerializer(serializers.ModelSerializer):
