@@ -3,6 +3,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .billing_models import SubscriptionPlan
 from .billing_serializers import CreateCheckoutPreferenceSerializer
 from .mercadopago_service import (
     LIBRARY_PLANS_CATALOG,
@@ -24,29 +25,61 @@ class BillingPlansListView(APIView):
 
     def get(self, request, *args, **kwargs):
         mp_service = MercadoPagoService()
+        plans_queryset = SubscriptionPlan.objects.filter(is_active=True).order_by("monthly_price")
         plans_list = []
 
-        for code, plan_data in LIBRARY_PLANS_CATALOG.items():
-            plans_list.append({
-                "code": plan_data["code"],
-                "name": plan_data["name"],
-                "superscript": plan_data["superscript"],
-                "badge_text": plan_data["badge_text"],
-                "is_featured": plan_data["is_featured"],
-                "subtitle_prefix": plan_data["subtitle_prefix"],
-                "subtitle_highlight": plan_data["subtitle_highlight"],
-                "subtitle_suffix": plan_data["subtitle_suffix"],
-                "monthly_price": str(plan_data["monthly_price"]),
-                "annual_monthly_equivalent": str(plan_data["annual_monthly_equivalent"]),
-                "annual_total_price": str(plan_data["annual_total_price"]),
-                "currency_id": plan_data["currency_id"],
-                "usd_reference": plan_data["usd_reference"],
-                "usage_multiplier_note": plan_data["usage_multiplier_note"],
-                "cta_label": plan_data["cta_label"],
-                "includes_heading": plan_data["includes_heading"],
-                "limits": plan_data["limits"],
-                "feature_groups": plan_data["feature_groups"],
-            })
+        if plans_queryset.exists():
+            for plan in plans_queryset:
+                plan_data = LIBRARY_PLANS_CATALOG.get(plan.code, {})
+                plans_list.append({
+                    "code": plan.code,
+                    "name": plan.name,
+                    "superscript": plan_data.get("superscript", "1"),
+                    "badge_text": plan.badge_text or plan_data.get("badge_text", ""),
+                    "is_featured": plan_data.get("is_featured", False),
+                    "subtitle_prefix": plan_data.get("subtitle_prefix", "Obtén "),
+                    "subtitle_highlight": plan_data.get("subtitle_highlight", "acceso mejorado"),
+                    "subtitle_suffix": plan_data.get("subtitle_suffix", ""),
+                    "monthly_price": str(plan.monthly_price),
+                    "annual_monthly_equivalent": str(plan.annual_monthly_equivalent),
+                    "annual_total_price": str(plan.annual_monthly_equivalent * 12),
+                    "currency_id": plan.currency_id,
+                    "usd_reference": plan_data.get("usd_reference", ""),
+                    "usage_multiplier_note": plan_data.get("usage_multiplier_note", ""),
+                    "cta_label": plan_data.get("cta_label", "Comenzar"),
+                    "includes_heading": plan_data.get("includes_heading", ""),
+                    "limits": {
+                        "max_books": plan.max_books,
+                        "max_items": plan.max_items,
+                        "max_librarians": plan.max_librarians,
+                        "has_mass_importer": plan.has_mass_importer,
+                        "has_ai_curator": plan.has_ai_curator,
+                        "has_priority_support": plan.has_priority_support,
+                    },
+                    "feature_groups": plan_data.get("feature_groups", []),
+                })
+        else:
+            for code, plan_data in LIBRARY_PLANS_CATALOG.items():
+                plans_list.append({
+                    "code": plan_data["code"],
+                    "name": plan_data["name"],
+                    "superscript": plan_data["superscript"],
+                    "badge_text": plan_data["badge_text"],
+                    "is_featured": plan_data["is_featured"],
+                    "subtitle_prefix": plan_data["subtitle_prefix"],
+                    "subtitle_highlight": plan_data["subtitle_highlight"],
+                    "subtitle_suffix": plan_data["subtitle_suffix"],
+                    "monthly_price": str(plan_data["monthly_price"]),
+                    "annual_monthly_equivalent": str(plan_data["annual_monthly_equivalent"]),
+                    "annual_total_price": str(plan_data["annual_total_price"]),
+                    "currency_id": plan_data["currency_id"],
+                    "usd_reference": plan_data["usd_reference"],
+                    "usage_multiplier_note": plan_data["usage_multiplier_note"],
+                    "cta_label": plan_data["cta_label"],
+                    "includes_heading": plan_data["includes_heading"],
+                    "limits": plan_data["limits"],
+                    "feature_groups": plan_data["feature_groups"],
+                })
 
         return Response(
             {

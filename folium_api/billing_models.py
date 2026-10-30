@@ -84,6 +84,37 @@ class SubscriptionPlan(models.Model):
         if errors:
             raise ValidationError(errors)
 
+    @classmethod
+    def sync_from_catalog(cls, catalog=None):
+        """Sincroniza los planes activos con el catálogo oficial del backend."""
+        if catalog is None:
+            from .mercadopago_service import LIBRARY_PLANS_CATALOG
+            catalog = LIBRARY_PLANS_CATALOG
+
+        synced = []
+        for code, plan_data in catalog.items():
+            limits = plan_data.get("limits", {})
+            instance, _ = cls.objects.update_or_create(
+                code=code,
+                defaults={
+                    "name": plan_data["name"],
+                    "badge_text": plan_data.get("badge_text", ""),
+                    "description": plan_data.get("description", plan_data.get("subtitle_suffix", "")),
+                    "monthly_price": Decimal(str(plan_data["monthly_price"])),
+                    "annual_monthly_equivalent": Decimal(str(plan_data["annual_monthly_equivalent"])),
+                    "currency_id": plan_data.get("currency_id", "ARS"),
+                    "max_books": limits.get("max_books", 0),
+                    "max_items": limits.get("max_items", 0),
+                    "max_librarians": limits.get("max_librarians", 1),
+                    "has_mass_importer": limits.get("has_mass_importer", False),
+                    "has_ai_curator": limits.get("has_ai_curator", False),
+                    "has_priority_support": limits.get("has_priority_support", False),
+                    "is_active": True,
+                },
+            )
+            synced.append(instance)
+        return synced
+
     def get_Checkout_amount(self, billing_cycle="MONTHLY"):
         """
         Calcula el monto exacto a cobrar según el ciclo de facturación.
