@@ -24,8 +24,11 @@ router.register(r'book', views.BookViewSet, basename='book')
 # Registro del ViewSet de Author
 router.register(r'author', views.AuthorViewSet, basename='author')
 
-# Registro del ViewSet de Author
+# Registro del ViewSet de Genre
 router.register(r'genre', views.GenreViewSet, basename='genre')
+
+# Registro del ViewSet de Editorial
+router.register(r'editorial', views.EditorialViewSet, basename='editorial')
 
 # Registro del ViewSet de Favoritos
 router.register(r'favorites', views.FavoriteViewSet, basename='favorite')

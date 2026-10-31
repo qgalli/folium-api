@@ -313,6 +313,26 @@ class GenreViewSet(viewsets.ModelViewSet):
                         qs = qs.filter(name__icontains=search)
                 return qs
 
+
+class EditorialViewSet(viewsets.ModelViewSet):
+        """
+        Controlador para gestionar editoriales.
+        Permite lectura a cualquier usuario (lectura pública) y gestión completa al bibliotecario.
+        Sin paginación por defecto para nutrir selectores de formularios sin recorrer libros.
+        Soporta búsqueda por texto con ?search= o ?q=.
+        """
+        queryset = Editorial.objects.all().order_by('name')
+        serializer_class = EditorialSerializer
+        permission_classes = [IsLibrarianOrPublicReadOnly]
+
+        def get_queryset(self):
+                qs = Editorial.objects.all().order_by('name')
+                search = self.request.query_params.get('search') or self.request.query_params.get('q')
+                if search:
+                        search = search.strip()
+                        qs = qs.filter(name__icontains=search)
+                return qs
+
 class FavoriteViewSet(viewsets.ModelViewSet):
         """
         Controlador para que los usuarios gestionen sus libros favoritos.

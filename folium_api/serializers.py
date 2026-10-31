@@ -141,6 +141,21 @@ class EditorialSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+    def validate_name(self, value):
+        str_val = re.sub(r"\s+", " ", str(value or "").strip())
+        if not str_val:
+            raise serializers.ValidationError("El nombre de la editorial no puede estar vacío.")
+        if str_val.isdigit():
+            raise serializers.ValidationError("El nombre de la editorial no puede consistir únicamente de números.")
+
+        queryset = Editorial.objects.filter(name__iexact=str_val)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe una editorial registrada con este nombre.")
+
+        return str_val
+
 
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(
@@ -421,8 +436,35 @@ class BookSimpleSerializer(serializers.ModelSerializer):
         ]
 
 
+class EditorialPrimaryKeyOrNameField(serializers.PrimaryKeyRelatedField):
+    """
+    Permite recibir tanto el ID numérico de una Editorial existente como su nombre en texto
+    (buscando case-insensitive o creándola si no existe).
+    """
+    def to_internal_value(self, data):
+        if isinstance(data, Editorial):
+            return data
+        if isinstance(data, int) or (isinstance(data, str) and data.strip().isdigit()):
+            try:
+                return super().to_internal_value(int(str(data).strip()))
+            except serializers.ValidationError:
+                if isinstance(data, int):
+                    raise
+        if isinstance(data, str):
+            clean_name = re.sub(r"\s+", " ", data.strip())
+            if not clean_name:
+                raise serializers.ValidationError("El nombre de la editorial no puede estar vacío.")
+            if len(clean_name) > 150:
+                raise serializers.ValidationError("El nombre de la editorial admite hasta 150 caracteres.")
+            existing = Editorial.objects.filter(name__iexact=clean_name).first()
+            if existing:
+                return existing
+            return Editorial.objects.create(name=clean_name)
+        return super().to_internal_value(data)
+
+
 class BookWriteSerializer(serializers.ModelSerializer):
-    editorial = serializers.PrimaryKeyRelatedField(
+    editorial = EditorialPrimaryKeyOrNameField(
         queryset=Editorial.objects.all(),
     )
 
