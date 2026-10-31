@@ -468,6 +468,44 @@ class CatalogPublicReadOnlyTests(APITestCase):
         response = self.client.get(reverse("folium_api:genre-list"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+    def test_anon_can_list_editorials(self):
+        response = self.client.get(reverse("folium_api:editorial-list"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_reader_cannot_create_editorial(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            reverse("folium_api:editorial-list"),
+            {"name": "Editorial No Autorizada"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_librarian_can_create_editorial(self):
+        self.client.force_authenticate(user=self.librarian)
+        response = self.client.post(
+            reverse("folium_api:editorial-list"),
+            {"name": "Editorial Nueva Permitida"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_librarian_can_create_book_with_editorial_name(self):
+        self.client.force_authenticate(user=self.librarian)
+        response = self.client.post(
+            reverse("folium_api:book-list"),
+            {
+                "title": "Libro Con Editorial Por Nombre",
+                "editorial": "Editorial Creada Al Vuelo",
+                "isbn": "9780000000003",
+                "authors": [self.author.id],
+                "genres": [self.genre.id],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Editorial.objects.filter(name="Editorial Creada Al Vuelo").exists())
+
     def test_anon_cannot_create_book(self):
         response = self.client.post(
             reverse("folium_api:book-list"),
