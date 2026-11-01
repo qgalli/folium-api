@@ -105,6 +105,15 @@ class Book(models.Model):
 
     def __str__(self):
         return self.title
+
+    def save(self, *args, **kwargs):
+        if self.cover_image and getattr(self.cover_image, 'name', None):
+            is_uncommitted = not getattr(self.cover_image, '_committed', True)
+            is_not_webp = not str(self.cover_image.name).lower().endswith('.webp')
+            if is_uncommitted or is_not_webp:
+                from .image_utils import optimize_django_image_field
+                optimize_django_image_field(self.cover_image)
+        super().save(*args, **kwargs)
     
 class Item(models.Model):
     class Status(models.TextChoices):

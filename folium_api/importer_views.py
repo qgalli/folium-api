@@ -253,6 +253,12 @@ def resolve_and_save_cover_for_isbn(isbn, ol_cover_url=None, timeout=3.5):
     remote = download_remote_cover_for_isbn(clean, ol_cover_url=ol_cover_url, timeout=timeout)
     if remote:
         img_bytes, ext, provider = remote
+        try:
+            from .image_utils import optimize_image_bytes_to_webp
+            img_bytes = optimize_image_bytes_to_webp(img_bytes)
+            ext = '.webp'
+        except Exception:
+            pass
         rel_media_path = f"books/covers/{clean}{ext}"
         media_target = Path(settings.MEDIA_ROOT) / rel_media_path
         try:

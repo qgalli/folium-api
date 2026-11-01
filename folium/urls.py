@@ -4,15 +4,14 @@ Acá se conectan las distintas partes del sistema con sus direcciones web.
 """
 
 from django.contrib import admin
-from django.urls import include, path
+from django.urls import include, path, re_path
 from rest_framework_simplejwt.views import TokenRefreshView
-from django.conf import settings
-from django.conf.urls.static import static
 from folium_api.views import (
     FoliumTokenObtainPairView,
     RandomBookView,
     BookRecommendationView,
 )
+from folium_api.media_views import serve_optimized_media
 
 urlpatterns = [
     # Panel de administración de Django (http://localhost:8000/admin/)
@@ -32,9 +31,7 @@ urlpatterns = [
     path('random/', RandomBookView.as_view(), name='root-random'),
     path('recommendation/', BookRecommendationView.as_view(), name='root-recommendation'),
     path('recommendations/', BookRecommendationView.as_view(), name='root-recommendations'),
-]
 
-# Sirve los archivos de /media (portadas, etc.) durante desarrollo.
-# En producción esto lo debería servir el proxy (nginx, S3, etc.), no Django.
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    # Entrega optimizada de archivos /media/ con cabeceras Edge CDN y fallback a WebP
+    re_path(r'^media/(?P<path>.*)$', serve_optimized_media, name='serve-media'),
+]
