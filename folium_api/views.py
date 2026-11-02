@@ -139,6 +139,19 @@ class LoanPagination(pagination.PageNumberPagination):
         page_size_query_param = 'page_size'
         max_page_size = 50
 
+        def paginate_queryset(self, queryset, request, view=None):
+                self.loan_summary = view.get_loan_summary() if view else {}
+                return super().paginate_queryset(queryset, request, view)
+
+        def get_paginated_response(self, data):
+                return Response({
+                        'count': self.page.paginator.count,
+                        'next': self.get_next_link(),
+                        'previous': self.get_previous_link(),
+                        'results': data,
+                        'summary': self.loan_summary,
+                })
+
 
 class LoanViewSet(viewsets.ModelViewSet):
         """
@@ -149,6 +162,31 @@ class LoanViewSet(viewsets.ModelViewSet):
         serializer_class = LoanWriteSerializer
         permission_classes = [IsLibrarianOrReadOnly]
         pagination_class = LoanPagination
+
+        def get_loan_summary(self):
+                user = self.request.user
+                qs = Loan.objects.all()
+                if not is_librarian_or_admin(user):
+                        qs = qs.filter(user=user)
+
+                now = timezone.now()
+                return qs.aggregate(
+                        due_today=Count(
+                                'pk',
+                                filter=Q(
+                                        returned_at__isnull=True,
+                                        due_at__date=timezone.localdate(now),
+                                ),
+                        ),
+                        due_total=Count(
+                                'pk',
+                                filter=Q(returned_at__isnull=True),
+                        ),
+                        overdue=Count(
+                                'pk',
+                                filter=Q(returned_at__isnull=True, due_at__lt=now),
+                        ),
+                )
 
         def get_queryset(self):
                 user = self.request.user
