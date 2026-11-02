@@ -57,7 +57,7 @@ class Book(models.Model):
         related_name="books"
     )
     
-    title = models.CharField(max_length=45)
+    title = models.CharField(max_length=200)
     editorial = models.ForeignKey(
         Editorial,
         on_delete=models.PROTECT,
