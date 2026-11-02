@@ -17,6 +17,7 @@ from .permissions import (
         is_librarian_or_admin,
         IsLibrarianOrReadOnly,
         IsLibrarianOrPublicReadOnly,
+        IsLibrarianOrAdminUser,
 )
 
 # Create your views here.
@@ -93,6 +94,10 @@ class ItemViewSet(viewsets.ModelViewSet):
                 search = self.request.query_params.get('search') or self.request.query_params.get('q')
                 status_param = self.request.query_params.get('status')
                 ordering = self.request.query_params.get('ordering')
+                book_param = self.request.query_params.get('book')
+
+                if book_param:
+                        qs = qs.filter(book_id=book_param)
 
                 if status_param:
                         qs = qs.filter(status=status_param)
@@ -352,6 +357,10 @@ class BookViewSet(viewsets.ModelViewSet):
                                 Q(author_full_name__icontains=search)
                         )
 
+                available_only = self.request.query_params.get('available_only')
+                if available_only in ['true', '1', 'True']:
+                        qs = qs.filter(items__status=Item.Status.AVAILABLE)
+
                 # distinct() evita libros duplicados cuando hay múltiples autores/géneros
                 return qs.distinct()
 
@@ -412,6 +421,39 @@ class BookViewSet(viewsets.ModelViewSet):
                 qs = qs.only('id', 'title', 'isbn').order_by('title')[:50]
                 serializer = BookOptionSerializer(qs, many=True)
                 return Response(serializer.data)
+
+        @action(detail=False, methods=['get'], permission_classes=[IsLibrarianOrReadOnly], url_path='available')
+        def available_books(self, request, *args, **kwargs):
+                """
+                Devuelve la lista de libros que tienen al menos un ejemplar disponible (Item AVAILABLE),
+                incluyendo los ítems disponibles para selección directa en mostrador.
+                Soporta búsqueda por texto con ?search= o ?q= (título, isbn, autor o código de ejemplar).
+                """
+                qs = Book.objects.filter(
+                        deleted_at__isnull=True,
+                        items__status=Item.Status.AVAILABLE
+                ).select_related('editorial').prefetch_related('authors', 'genres', 'items').distinct()
+
+                search = request.query_params.get('search') or request.query_params.get('q')
+                if search:
+                        search = search.strip()
+                        qs = qs.annotate(
+                                author_full_name=Concat(
+                                        F('authors__name'),
+                                        Value(' '),
+                                        F('authors__last_name')
+                                )
+                        ).filter(
+                                Q(title__icontains=search) |
+                                Q(isbn__icontains=search) |
+                                Q(authors__name__icontains=search) |
+                                Q(authors__last_name__icontains=search) |
+                                Q(author_full_name__icontains=search) |
+                                Q(items__inventory_code__icontains=search)
+                        ).distinct()
+
+                serializer = BookAvailableOptionSerializer(qs, many=True, context={'request': request})
+                return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class AuthorViewSet(viewsets.ModelViewSet):
@@ -526,6 +568,88 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
         def get_object(self):
                 return self.request.user
+
+
+class UserViewSet(viewsets.ModelViewSet):
+        """
+        Controlador para que los bibliotecarios y administradores gestionen
+        los usuarios del sistema (búsqueda por DNI para préstamos en mostrador y alta de lectores).
+        """
+        queryset = User.objects.filter(deleted_at__isnull=True).order_by('-date_joined')
+        serializer_class = UserSerializer
+        permission_classes = [IsLibrarianOrAdminUser]
+
+        def get_queryset(self):
+                qs = User.objects.filter(deleted_at__isnull=True)
+                dni = self.request.query_params.get('dni')
+                search = self.request.query_params.get('search') or self.request.query_params.get('q')
+                rol = self.request.query_params.get('rol')
+
+                if dni:
+                        try:
+                                qs = qs.filter(dni=int(dni))
+                        except (ValueError, TypeError):
+                                return qs.none()
+
+                if rol:
+                        qs = qs.filter(rol=rol)
+
+                if search:
+                        search = search.strip()
+                        qs = qs.filter(
+                                Q(dni__icontains=search) |
+                                Q(username__icontains=search) |
+                                Q(first_name__icontains=search) |
+                                Q(last_name__icontains=search) |
+                                Q(email__icontains=search)
+                        )
+
+                return qs.order_by('-date_joined')
+
+        @action(detail=False, methods=['get'], url_path=r'by-dni/(?P<dni>\d+)')
+        def by_dni(self, request, dni=None):
+                try:
+                        user = User.objects.get(dni=int(dni), deleted_at__isnull=True)
+                        serializer = UserSerializer(user)
+                        active_loans_count = Loan.objects.filter(user=user, returned_at__isnull=True).count()
+                        data = serializer.data
+                        data['active_loans_count'] = active_loans_count
+                        data['full_name'] = user.get_full_name() or user.username
+                        return Response(data, status=status.HTTP_200_OK)
+                except User.DoesNotExist:
+                        return Response(
+                                {"detail": f"No se encontró ningún lector con el DNI {dni}."},
+                                status=status.HTTP_404_NOT_FOUND
+                        )
+
+        def create(self, request, *args, **kwargs):
+                data = request.data.copy()
+                if 'rol' not in data or not data['rol']:
+                        data['rol'] = User.Rol.USER
+
+                # Si no se provee username, generarlo automáticamente a partir del DNI o nombre
+                if not data.get('username') or not str(data.get('username')).strip():
+                        dni_val = data.get('dni', '')
+                        first_name = (data.get('first_name') or '').strip().lower()
+                        base_username = f"{first_name}_{dni_val}" if first_name and dni_val else f"lector_{dni_val}" if dni_val else "lector"
+                        candidate = re.sub(r'[^a-zA-Z0-9_]', '', base_username)
+                        counter = 1
+                        while User.objects.filter(username__iexact=candidate).exists():
+                                candidate = f"{base_username}_{counter}"
+                                counter += 1
+                        data['username'] = candidate
+
+                serializer = self.get_serializer(data=data)
+                serializer.is_valid(raise_exception=True)
+                self.perform_create(serializer)
+                headers = self.get_success_headers(serializer.data)
+
+                resp_data = serializer.data
+                resp_data['active_loans_count'] = 0
+                user_obj = serializer.instance
+                resp_data['full_name'] = user_obj.get_full_name() or user_obj.username
+
+                return Response(resp_data, status=status.HTTP_201_CREATED, headers=headers)
 
 
 class ReservationViewSet(viewsets.ModelViewSet):
