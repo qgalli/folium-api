@@ -290,7 +290,7 @@ Todas las rutas de la API están prefijadas por `/api/v1/`.
 ### Circulación y Préstamos (`/loan/`)
 | Método | Endpoint | Acceso | Descripción |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/loan/` | Autenticado | Si es `USER`, lista sus propios préstamos. Si es `LIBRARIAN`/`ADMIN`, lista préstamos globales con filtro por mora. |
+| `GET` | `/loan/` | Autenticado | Lista préstamos propios para `USER` o globales para `LIBRARIAN`/`ADMIN`. Acepta filtros `user` (nombre, apellido, email, username o ID), `item` (título, código de inventario o ID), `status` (`active`, `overdue`, `returned`) y ordenamiento mediante `ordering` (`item`, `id`, `-id`, `loaned_at`, `-loaned_at`, `remaining`, `-remaining`). Paginado con `page` y `page_size` (20 por defecto, máximo 50); devuelve `count`, `next`, `previous` y `results`. El orden `remaining` agrupa activos, vencidos y devueltos en ese orden; el prefijo `-` invierte el orden dentro de cada grupo. |
 | `POST` | `/loan/` | Staff | Creación de préstamo asociando un `Item` disponible a un `User`. Cambia el estado del ítem a `LOANED`. |
 | `POST` | `/loan/{id}/return_book/` | Staff | Registra `returned_at = now()` y devuelve el ítem a `AVAILABLE` de forma atómica. |
 
