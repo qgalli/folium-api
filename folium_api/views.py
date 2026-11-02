@@ -7,8 +7,10 @@ from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
 import random
-from django.db.models import Avg, Count, Q, F, Value
-from django.db.models.functions import Concat
+from django.db.models import Avg, Case, Count, DateTimeField, F, IntegerField, Q, Value, When
+from django.db.models.functions import Concat, Lower
+from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 from .models import *
 from .serializers import *
 from .permissions import (
@@ -132,6 +134,12 @@ class ItemViewSet(viewsets.ModelViewSet):
                         return ItemReadSerializer
                 return ItemSerializer
 
+class LoanPagination(pagination.PageNumberPagination):
+        page_size = 20
+        page_size_query_param = 'page_size'
+        max_page_size = 50
+
+
 class LoanViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar los préstamos.
@@ -140,17 +148,119 @@ class LoanViewSet(viewsets.ModelViewSet):
         """
         serializer_class = LoanWriteSerializer
         permission_classes = [IsLibrarianOrReadOnly]
+        pagination_class = LoanPagination
 
         def get_queryset(self):
                 user = self.request.user
                 base_qs = Loan.objects.select_related('item__book__editorial', 'user')
                 # Bibliotecarios y administradores pueden ver todos los préstamos
                 if is_librarian_or_admin(user):
-                        return base_qs.all()
+                        qs = base_qs.all()
                 # Lectores únicamente pueden ver sus propios préstamos
-                if user.is_authenticated:
-                        return base_qs.filter(user=user)
-                return Loan.objects.none()
+                elif user.is_authenticated:
+                        qs = base_qs.filter(user=user)
+                else:
+                        return Loan.objects.none()
+
+                if self.action != 'list':
+                        return qs
+
+                user_search = self.request.query_params.get('user', '').strip()
+                item_search = self.request.query_params.get('item', '').strip()
+                status_filter = self.request.query_params.get('status', '').strip().lower()
+                ordering = self.request.query_params.get('ordering', '-loaned_at')
+
+                if user_search:
+                        user_query = (
+                                Q(user__first_name__icontains=user_search)
+                                | Q(user__last_name__icontains=user_search)
+                                | Q(user__username__icontains=user_search)
+                                | Q(user__email__icontains=user_search)
+                                | Q(user_full_name__icontains=user_search)
+                        )
+                        if user_search.isdigit():
+                                user_query |= Q(user_id=int(user_search))
+                        qs = qs.annotate(
+                                user_full_name=Concat(
+                                        F('user__first_name'),
+                                        Value(' '),
+                                        F('user__last_name'),
+                                )
+                        ).filter(user_query)
+
+                if item_search:
+                        item_query = (
+                                Q(item__inventory_code__icontains=item_search)
+                                | Q(item__book__title__icontains=item_search)
+                        )
+                        if item_search.isdigit():
+                                item_query |= Q(item_id=int(item_search))
+                        qs = qs.filter(item_query)
+
+                valid_statuses = {'active', 'overdue', 'returned'}
+                if status_filter and status_filter not in valid_statuses:
+                        raise ValidationError({
+                                'status': 'Use uno de estos estados: active, overdue, returned.'
+                        })
+                now = timezone.now()
+                if status_filter == 'returned':
+                        qs = qs.filter(returned_at__isnull=False)
+                elif status_filter == 'overdue':
+                        qs = qs.filter(returned_at__isnull=True, due_at__lt=now)
+                elif status_filter == 'active':
+                        qs = qs.filter(returned_at__isnull=True, due_at__gte=now)
+
+                valid_orderings = {
+                        'item', 'id', '-id', 'loaned_at', '-loaned_at',
+                        'remaining', '-remaining',
+                }
+                if ordering not in valid_orderings:
+                        raise ValidationError({
+                                'ordering': 'Ordenamiento inválido.'
+                        })
+
+                if ordering == 'item':
+                        return qs.order_by(
+                                Lower('item__book__title'),
+                                Lower('item__inventory_code'),
+                                'pk',
+                        )
+                if ordering in {'id', '-id'}:
+                        return qs.order_by(ordering)
+                if ordering in {'loaned_at', '-loaned_at'}:
+                        return qs.order_by(ordering, 'pk')
+
+                direction = '-' if ordering == '-remaining' else ''
+                qs = qs.annotate(
+                        loan_status_order=Case(
+                                When(returned_at__isnull=False, then=Value(2)),
+                                When(due_at__lt=now, then=Value(1)),
+                                default=Value(0),
+                                output_field=IntegerField(),
+                        ),
+                        active_due_order=Case(
+                                When(returned_at__isnull=True, due_at__gte=now, then=F('due_at')),
+                                default=Value(None),
+                                output_field=DateTimeField(),
+                        ),
+                        overdue_due_order=Case(
+                                When(returned_at__isnull=True, due_at__lt=now, then=F('due_at')),
+                                default=Value(None),
+                                output_field=DateTimeField(),
+                        ),
+                        returned_date_order=Case(
+                                When(returned_at__isnull=False, then=F('returned_at')),
+                                default=Value(None),
+                                output_field=DateTimeField(),
+                        ),
+                )
+                return qs.order_by(
+                        'loan_status_order',
+                        f'{direction}active_due_order',
+                        f'{direction}overdue_due_order',
+                        f'{direction}returned_date_order',
+                        'pk',
+                )
 
         def get_serializer_class(self):
                 if self.action in ['list', 'retrieve']:
@@ -534,4 +644,3 @@ class BookRecommendationView(generics.GenericAPIView):
 
                 serializer = self.get_serializer(books, many=True, context={"request": request})
                 return Response(serializer.data, status=status.HTTP_200_OK)
-

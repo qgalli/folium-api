@@ -1,9 +1,12 @@
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
-from .models import Author, Book, Editorial, Review, Item
+from .models import Author, Book, Editorial, Review, Item, Loan
 
 User = get_user_model()
 
@@ -544,3 +547,222 @@ class CatalogPublicReadOnlyTests(APITestCase):
         response_loans = self.client.get(reverse("folium_api:loan-list"))
         self.assertEqual(response_loans.status_code, status.HTTP_403_FORBIDDEN)
 
+
+class LoanListQueryTests(APITestCase):
+    def setUp(self):
+        self.editorial = Editorial.objects.create(name="Editorial de préstamos")
+        self.librarian = User.objects.create_user(
+            username="loan-librarian",
+            dni=60111222,
+            email="loan-librarian@example.com",
+            password="test-password",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.reader = User.objects.create_user(
+            username="camila",
+            dni=60111223,
+            email="camila@example.com",
+            password="test-password",
+            first_name="Camila",
+            last_name="Pérez",
+            rol=User.Rol.USER,
+        )
+        self.client.force_authenticate(user=self.librarian)
+
+    def create_loan(self, title, code, due_at, returned_at=None, user=None):
+        book = Book.objects.create(title=title, editorial=self.editorial)
+        item = Item.objects.create(book=book, inventory_code=code)
+        loaned_at = timezone.now() - timedelta(days=10)
+        return Loan.objects.create(
+            item=item,
+            user=user or self.reader,
+            loaned_at=loaned_at,
+            due_at=due_at,
+            returned_at=returned_at,
+        )
+
+    def test_filters_by_user_item_and_status(self):
+        now = timezone.now()
+        active = self.create_loan(
+            "Libro Activo", "INV-ACTIVO", now + timedelta(days=3)
+        )
+        overdue = self.create_loan(
+            "Libro Vencido", "INV-VENCIDO", now - timedelta(days=3)
+        )
+        returned = self.create_loan(
+            "Libro Devuelto",
+            "INV-DEVUELTO",
+            now - timedelta(days=5),
+            returned_at=now - timedelta(days=1),
+        )
+
+        response = self.client.get(
+            reverse("folium_api:loan-list"),
+            {"user": "Camila Pérez", "item": "INV-VENCIDO", "status": "overdue"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row["id"] for row in response.data["results"]],
+            [overdue.id],
+        )
+
+        for status_filter, expected in (
+            ("active", active),
+            ("overdue", overdue),
+            ("returned", returned),
+        ):
+            with self.subTest(status=status_filter):
+                response = self.client.get(
+                    reverse("folium_api:loan-list"),
+                    {"status": status_filter},
+                )
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(
+                    [row["id"] for row in response.data["results"]],
+                    [expected.id],
+                )
+
+    def test_remaining_sort_keeps_active_overdue_and_returned_groups(self):
+        now = timezone.now()
+        active_later = self.create_loan(
+            "Activo Lejano", "INV-ACTIVO-2", now + timedelta(days=5)
+        )
+        overdue_older = self.create_loan(
+            "Vencido Antiguo", "INV-VENCIDO-2", now - timedelta(days=8)
+        )
+        returned = self.create_loan(
+            "Ya Devuelto",
+            "INV-DEVUELTO-2",
+            now - timedelta(days=9),
+            returned_at=now - timedelta(days=2),
+        )
+        active_soon = self.create_loan(
+            "Activo Próximo", "INV-ACTIVO-1", now + timedelta(days=1)
+        )
+        overdue_recent = self.create_loan(
+            "Vencido Reciente", "INV-VENCIDO-1", now - timedelta(days=2)
+        )
+
+        response = self.client.get(
+            reverse("folium_api:loan-list"), {"ordering": "remaining"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row["id"] for row in response.data["results"]],
+            [
+                active_soon.id,
+                active_later.id,
+                overdue_older.id,
+                overdue_recent.id,
+                returned.id,
+            ],
+        )
+
+        descending_response = self.client.get(
+            reverse("folium_api:loan-list"), {"ordering": "-remaining"}
+        )
+        self.assertEqual(descending_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row["id"] for row in descending_response.data["results"]],
+            [
+                active_later.id,
+                active_soon.id,
+                overdue_recent.id,
+                overdue_older.id,
+                returned.id,
+            ],
+        )
+
+    def test_item_ordering_and_page_size_return_drf_pagination(self):
+        now = timezone.now()
+        second = self.create_loan(
+            "Zeta", "INV-ZETA", now + timedelta(days=3)
+        )
+        first = self.create_loan(
+            "Alfa", "INV-ALFA", now + timedelta(days=3)
+        )
+        third = self.create_loan(
+            "Beta", "INV-BETA", now + timedelta(days=3)
+        )
+
+        response = self.client.get(
+            reverse("folium_api:loan-list"),
+            {"ordering": "item", "page": 1, "page_size": 2},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 3)
+        self.assertIsNotNone(response.data["next"])
+        self.assertIsNone(response.data["previous"])
+        self.assertEqual(
+            [row["id"] for row in response.data["results"]],
+            [first.id, third.id],
+        )
+
+        next_response = self.client.get(
+            reverse("folium_api:loan-list"),
+            {"ordering": "item", "page": 2, "page_size": 2},
+        )
+        self.assertEqual(next_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row["id"] for row in next_response.data["results"]],
+            [second.id],
+        )
+
+    def test_page_size_is_capped_at_50(self):
+        now = timezone.now()
+        for index in range(51):
+            self.create_loan(
+                f"Libro {index}",
+                f"INV-PAGE-{index}",
+                now + timedelta(days=3),
+            )
+
+        response = self.client.get(
+            reverse("folium_api:loan-list"), {"page_size": 100}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 51)
+        self.assertEqual(len(response.data["results"]), 50)
+        self.assertIsNotNone(response.data["next"])
+
+    def test_invalid_status_or_ordering_returns_validation_error(self):
+        for params in ({"status": "unknown"}, {"ordering": "not-allowed"}):
+            with self.subTest(params=params):
+                response = self.client.get(reverse("folium_api:loan-list"), params)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reader_filters_remain_scoped_to_the_authenticated_user(self):
+        other_reader = User.objects.create_user(
+            username="other-reader",
+            dni=60111224,
+            email="other-reader@example.com",
+            password="test-password",
+            rol=User.Rol.USER,
+        )
+        self.create_loan(
+            "Préstamo de Camila",
+            "INV-CAMILA",
+            timezone.now() + timedelta(days=2),
+        )
+        other_loan = self.create_loan(
+            "Préstamo de otra persona",
+            "INV-OTRO",
+            timezone.now() + timedelta(days=2),
+            user=other_reader,
+        )
+        self.client.force_authenticate(user=self.reader)
+
+        response = self.client.get(
+            reverse("folium_api:loan-list"), {"user": "other-reader"}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+        self.assertNotIn(
+            other_loan.id,
+            [row["id"] for row in response.data["results"]],
+        )
