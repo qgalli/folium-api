@@ -297,7 +297,8 @@ Todas las rutas de la API están prefijadas por `/api/v1/`.
 ### Reservas y Reseñas
 | Método | Endpoint | Acceso | Descripción |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/reservations/` | Autenticado | Lista reservas del usuario o del sistema según rol. |
+| `GET` | `/reservations/` | Autenticado | Devuelve una lista completa, sin paginación, de las reservas propias para `USER` o globales para `LIBRARIAN`/`ADMIN`. Acepta filtros opcionales `user` (nombre, apellido, username, email o ID exacto), `book` (título, ISBN o ID exacto), `status` (`pending`, `expired`, `completed`, `cancelled`) y ordenamiento `ordering` (`created_at`, `-created_at`, `title`). El orden por fecha prioriza pendientes vigentes, expiradas, completadas y canceladas; dentro de cada grupo aplica la dirección de fecha elegida. Las reservas `PENDING` con `expires_at` pasado se consideran expiradas para filtrar, ordenar y contar. |
+| `GET` | `/reservations/summary/` | Autenticado | Devuelve los conteos visibles para el usuario autenticado: `pending`, `completed` y `cancelled`. Las pendientes expiradas no se incluyen en `pending`. |
 | `POST` | `/reservations/` | Autenticado (`USER`) | Reserva un libro sin stock disponible inmediato. Asigna fecha de expiración por defecto. |
 | `PATCH` | `/reservations/{id}/` | Autenticado | Cancelación voluntaria por parte del usuario o resolución por bibliotecario. |
 | `GET` | `/reviews/?book={id}` | Público | Lista de reseñas y comentarios aprobados para un libro. |
