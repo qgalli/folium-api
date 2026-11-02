@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
-from .models import Author, Book, Editorial, Review, Item, Loan
+from .models import Author, Book, Editorial, Review, Item, Loan, Reservation
 
 User = get_user_model()
 
@@ -779,4 +779,240 @@ class LoanListQueryTests(APITestCase):
         self.assertNotIn(
             other_loan.id,
             [row["id"] for row in response.data["results"]],
+        )
+
+
+class ReservationListQueryTests(APITestCase):
+    def setUp(self):
+        self.editorial = Editorial.objects.create(name="Editorial de reservas")
+        self.librarian = User.objects.create_user(
+            username="reservation-librarian",
+            dni=70111222,
+            email="reservation-librarian@example.com",
+            password="test-password",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.reader = User.objects.create_user(
+            username="camila-reservation",
+            dni=70111223,
+            email="camila-reservation@example.com",
+            password="test-password",
+            first_name="Camila",
+            last_name="Pérez",
+            rol=User.Rol.USER,
+        )
+        self.client.force_authenticate(user=self.librarian)
+
+    def create_reservation(self, title, status, expires_at, user=None, isbn=None):
+        book = Book.objects.create(
+            title=title,
+            editorial=self.editorial,
+            isbn=isbn,
+        )
+        return Reservation.objects.create(
+            book=book,
+            user=user or self.reader,
+            status=status,
+            expires_at=expires_at,
+        )
+
+    def test_filters_by_user_book_and_effective_expired_status(self):
+        now = timezone.now()
+        expired_reservation = self.create_reservation(
+            "El gato negro",
+            Reservation.StatusReservation.PENDING,
+            now - timedelta(days=1),
+            isbn="9780000000001",
+        )
+        self.create_reservation(
+            "Libro pendiente",
+            Reservation.StatusReservation.PENDING,
+            now + timedelta(days=2),
+            isbn="9780000000002",
+        )
+
+        response = self.client.get(
+            reverse("folium_api:reservation-list"),
+            {
+                "user": "Camila Pérez",
+                "book": "9780000000001",
+                "status": "expired",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(response.data, list)
+        self.assertEqual(
+            [reservation["id"] for reservation in response.data],
+            [expired_reservation.id],
+        )
+
+    def test_status_filters_and_date_order_keep_priority_groups(self):
+        now = timezone.now()
+        late_pending = self.create_reservation(
+            "Pendiente tardía",
+            Reservation.StatusReservation.PENDING,
+            now + timedelta(days=1),
+        )
+        early_pending = self.create_reservation(
+            "Pendiente temprana",
+            Reservation.StatusReservation.PENDING,
+            now + timedelta(days=1),
+        )
+        expired = self.create_reservation(
+            "Expirada",
+            Reservation.StatusReservation.EXPIRED,
+            now - timedelta(days=1),
+        )
+        completed = self.create_reservation(
+            "Completada",
+            Reservation.StatusReservation.COMPLETED,
+            now + timedelta(days=1),
+        )
+        cancelled = self.create_reservation(
+            "Cancelada",
+            Reservation.StatusReservation.CANCELED,
+            now + timedelta(days=1),
+        )
+        Reservation.objects.filter(pk=late_pending.pk).update(
+            created_at=now - timedelta(days=2)
+        )
+        Reservation.objects.filter(pk=early_pending.pk).update(
+            created_at=now - timedelta(days=1)
+        )
+
+        response = self.client.get(
+            reverse("folium_api:reservation-list"),
+            {"ordering": "created_at"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [reservation["id"] for reservation in response.data],
+            [
+                late_pending.id,
+                early_pending.id,
+                expired.id,
+                completed.id,
+                cancelled.id,
+            ],
+        )
+        descending_response = self.client.get(
+            reverse("folium_api:reservation-list"),
+            {"ordering": "-created_at"},
+        )
+        self.assertEqual(descending_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [reservation["id"] for reservation in descending_response.data],
+            [
+                early_pending.id,
+                late_pending.id,
+                expired.id,
+                completed.id,
+                cancelled.id,
+            ],
+        )
+
+        for status_filter, expected in (
+            ("pending", {late_pending.id, early_pending.id}),
+            ("expired", {expired.id}),
+            ("completed", {completed.id}),
+            ("cancelled", {cancelled.id}),
+        ):
+            with self.subTest(status=status_filter):
+                filtered = self.client.get(
+                    reverse("folium_api:reservation-list"),
+                    {"status": status_filter},
+                )
+                self.assertEqual(filtered.status_code, status.HTTP_200_OK)
+                self.assertEqual(
+                    {reservation["id"] for reservation in filtered.data},
+                    expected,
+                )
+
+    def test_title_ordering_and_summary_endpoint(self):
+        now = timezone.now()
+        zeta = self.create_reservation(
+            "Zeta",
+            Reservation.StatusReservation.PENDING,
+            now + timedelta(days=2),
+        )
+        alfa = self.create_reservation(
+            "Alfa",
+            Reservation.StatusReservation.PENDING,
+            now + timedelta(days=2),
+        )
+        completed = self.create_reservation(
+            "Completada",
+            Reservation.StatusReservation.COMPLETED,
+            now + timedelta(days=2),
+        )
+        cancelled = self.create_reservation(
+            "Cancelada",
+            Reservation.StatusReservation.CANCELED,
+            now + timedelta(days=2),
+        )
+        expired = self.create_reservation(
+            "Pendiente vencida",
+            Reservation.StatusReservation.PENDING,
+            now - timedelta(days=1),
+        )
+
+        response = self.client.get(
+            reverse("folium_api:reservation-list"), {"ordering": "title"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [reservation["id"] for reservation in response.data],
+            [alfa.id, cancelled.id, completed.id, expired.id, zeta.id],
+        )
+
+        summary = self.client.get(reverse("folium_api:reservation-summary"))
+        self.assertEqual(summary.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            summary.data,
+            {"pending": 2, "completed": 1, "cancelled": 1},
+        )
+
+    def test_invalid_status_or_ordering_returns_validation_error(self):
+        for params in ({"status": "unknown"}, {"ordering": "not-allowed"}):
+            with self.subTest(params=params):
+                response = self.client.get(
+                    reverse("folium_api:reservation-list"), params
+                )
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reader_list_and_summary_remain_scoped_to_authenticated_user(self):
+        other_reader = User.objects.create_user(
+            username="other-reservation-reader",
+            dni=70111224,
+            email="other-reservation-reader@example.com",
+            password="test-password",
+            rol=User.Rol.USER,
+        )
+        own_reservation = self.create_reservation(
+            "Reserva propia",
+            Reservation.StatusReservation.PENDING,
+            timezone.now() + timedelta(days=1),
+        )
+        other_reservation = self.create_reservation(
+            "Reserva ajena",
+            Reservation.StatusReservation.COMPLETED,
+            timezone.now() + timedelta(days=1),
+            user=other_reader,
+        )
+        self.client.force_authenticate(user=self.reader)
+
+        response = self.client.get(reverse("folium_api:reservation-list"))
+        summary = self.client.get(reverse("folium_api:reservation-summary"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [reservation["id"] for reservation in response.data],
+            [own_reservation.id],
+        )
+        self.assertNotIn(other_reservation.id, [row["id"] for row in response.data])
+        self.assertEqual(
+            summary.data,
+            {"pending": 1, "completed": 0, "cancelled": 0},
         )

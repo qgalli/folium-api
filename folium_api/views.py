@@ -216,8 +216,10 @@ class LoanViewSet(viewsets.ModelViewSet):
                                 | Q(user__email__icontains=user_search)
                                 | Q(user_full_name__icontains=user_search)
                         )
-                        if user_search.isdigit():
-                                user_query |= Q(user_id=int(user_search))
+                        if user_search.isdigit() and len(user_search) <= 10:
+                                user_id = int(user_search)
+                                if user_id <= 2_147_483_647:
+                                        user_query |= Q(user_id=user_id)
                         qs = qs.annotate(
                                 user_full_name=Concat(
                                         F('user__first_name'),
@@ -545,6 +547,144 @@ class ReservationViewSet(viewsets.ModelViewSet):
                 if user.is_authenticated:
                         return base_qs.filter(user=user)
                 return Reservation.objects.none()
+
+        def filter_queryset_for_list(self, queryset):
+                params = self.request.query_params
+                user_search = params.get('user', '').strip()
+                book_search = params.get('book', '').strip()
+                status_filter = params.get('status', '').strip().lower()
+                ordering = params.get('ordering', '-created_at')
+
+                if user_search:
+                        user_query = (
+                                Q(user__first_name__icontains=user_search)
+                                | Q(user__last_name__icontains=user_search)
+                                | Q(user__username__icontains=user_search)
+                                | Q(user__email__icontains=user_search)
+                                | Q(user_full_name__icontains=user_search)
+                        )
+                        if user_search.isdigit():
+                                user_query |= Q(user_id=int(user_search))
+                        queryset = queryset.annotate(
+                                user_full_name=Concat(
+                                        F('user__first_name'),
+                                        Value(' '),
+                                        F('user__last_name'),
+                                )
+                        ).filter(user_query)
+
+                if book_search:
+                        book_query = (
+                                Q(book__title__icontains=book_search)
+                                | Q(book__isbn__icontains=book_search)
+                        )
+                        if book_search.isdigit() and len(book_search) <= 10:
+                                book_id = int(book_search)
+                                if book_id <= 2_147_483_647:
+                                        book_query |= Q(book_id=book_id)
+                        queryset = queryset.filter(book_query)
+
+                valid_statuses = {'pending', 'expired', 'completed', 'cancelled'}
+                if status_filter and status_filter not in valid_statuses:
+                        raise ValidationError({
+                                'status': 'Use uno de estos estados: pending, expired, completed, cancelled.'
+                        })
+
+                now = timezone.now()
+                if status_filter == 'pending':
+                        queryset = queryset.filter(
+                                status=Reservation.StatusReservation.PENDING,
+                                expires_at__gt=now,
+                        )
+                elif status_filter == 'expired':
+                        queryset = queryset.filter(
+                                Q(status=Reservation.StatusReservation.EXPIRED)
+                                | Q(
+                                        status=Reservation.StatusReservation.PENDING,
+                                        expires_at__lte=now,
+                                )
+                        )
+                elif status_filter == 'completed':
+                        queryset = queryset.filter(
+                                status=Reservation.StatusReservation.COMPLETED
+                        )
+                elif status_filter == 'cancelled':
+                        queryset = queryset.filter(
+                                status=Reservation.StatusReservation.CANCELED
+                        )
+
+                valid_orderings = {'created_at', '-created_at', 'title'}
+                if ordering not in valid_orderings:
+                        raise ValidationError({
+                                'ordering': 'Use created_at, -created_at o title.'
+                        })
+
+                if ordering == 'title':
+                        return queryset.order_by(Lower('book__title'), 'pk').distinct()
+
+                direction = '-' if ordering == '-created_at' else ''
+                queryset = queryset.annotate(
+                        reservation_status_order=Case(
+                                When(
+                                        status=Reservation.StatusReservation.PENDING,
+                                        expires_at__gt=now,
+                                        then=Value(0),
+                                ),
+                                When(
+                                        status=Reservation.StatusReservation.PENDING,
+                                        expires_at__lte=now,
+                                        then=Value(1),
+                                ),
+                                When(
+                                        status=Reservation.StatusReservation.EXPIRED,
+                                        then=Value(1),
+                                ),
+                                When(
+                                        status=Reservation.StatusReservation.COMPLETED,
+                                        then=Value(2),
+                                ),
+                                default=Value(3),
+                                output_field=IntegerField(),
+                        )
+                )
+                return queryset.order_by(
+                        'reservation_status_order',
+                        f'{direction}created_at',
+                        'pk',
+                ).distinct()
+
+        def filter_queryset(self, queryset):
+                queryset = super().filter_queryset(queryset)
+                if self.action == 'list':
+                        return self.filter_queryset_for_list(queryset)
+                return queryset
+
+        @action(detail=False, methods=['get'])
+        def summary(self, request):
+                now = timezone.now()
+                return Response(
+                        self.get_queryset().aggregate(
+                                pending=Count(
+                                        'pk',
+                                        filter=Q(
+                                                status=Reservation.StatusReservation.PENDING,
+                                                expires_at__gt=now,
+                                        ),
+                                ),
+                                completed=Count(
+                                        'pk',
+                                        filter=Q(
+                                                status=Reservation.StatusReservation.COMPLETED
+                                        ),
+                                ),
+                                cancelled=Count(
+                                        'pk',
+                                        filter=Q(
+                                                status=Reservation.StatusReservation.CANCELED
+                                        ),
+                                ),
+                        )
+                )
 
         def perform_create(self, serializer):
                 # Asigna automáticamente el usuario que hace la solicitud
