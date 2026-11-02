@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.urls import reverse
@@ -595,6 +595,10 @@ class LoanListQueryTests(APITestCase):
             now - timedelta(days=5),
             returned_at=now - timedelta(days=1),
         )
+        due_today_at = timezone.make_aware(
+            datetime.combine(timezone.localdate(now), time(23, 59, 59))
+        )
+        self.create_loan("Libro para hoy", "INV-HOY", due_today_at)
 
         response = self.client.get(
             reverse("folium_api:loan-list"),
@@ -605,6 +609,14 @@ class LoanListQueryTests(APITestCase):
         self.assertEqual(
             [row["id"] for row in response.data["results"]],
             [overdue.id],
+        )
+        self.assertEqual(
+            response.data["summary"],
+            {
+                "due_today": 1,
+                "due_total": 3,
+                "overdue": 1,
+            },
         )
 
         for status_filter, expected in (
@@ -694,6 +706,7 @@ class LoanListQueryTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 3)
+        self.assertEqual(response.data["summary"]["due_total"], 3)
         self.assertIsNotNone(response.data["next"])
         self.assertIsNone(response.data["previous"])
         self.assertEqual(
@@ -762,6 +775,7 @@ class LoanListQueryTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 0)
+        self.assertEqual(response.data["summary"]["due_total"], 1)
         self.assertNotIn(
             other_loan.id,
             [row["id"] for row in response.data["results"]],
