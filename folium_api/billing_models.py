@@ -14,8 +14,9 @@ class SubscriptionPlan(models.Model):
     """
     class PlanCode(models.TextChoices):
         FREE = "FREE", "Folium Comunidad (Sin Cargo)"
-        PLUS = "PLUS", "Folium Acervo Plus"
-        PRO = "PRO", "Folium Patrimonio Pro"
+        BASIC = "BASIC", "Folium Gestión"
+        PRO = "PRO", "Folium Integral"
+        PREMIUM = "PREMIUM", "Folium Nexus AI"
 
     code = models.CharField(
         max_length=20,

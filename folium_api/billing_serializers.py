@@ -11,7 +11,7 @@ class CreateCheckoutPreferenceSerializer(serializers.Serializer):
     plan_code = serializers.ChoiceField(
         choices=[(k, v["name"]) for k, v in LIBRARY_PLANS_CATALOG.items()],
         error_messages={
-            "invalid_choice": "El plan seleccionado no es válido. Opciones permitidas: PLUS, PRO."
+            "invalid_choice": "El plan seleccionado no es válido. Opciones permitidas: BASIC, PRO, PREMIUM."
         },
     )
     billing_cycle = serializers.ChoiceField(
