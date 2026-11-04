@@ -7,8 +7,10 @@ from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
 import random
-from django.db.models import Avg, Count, Q, F, Value
-from django.db.models.functions import Concat
+from django.db.models import Avg, Case, Count, DateTimeField, F, IntegerField, Q, Value, When
+from django.db.models.functions import Concat, Lower
+from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 from .models import *
 from .serializers import *
 from .permissions import (
@@ -137,6 +139,25 @@ class ItemViewSet(viewsets.ModelViewSet):
                         return ItemReadSerializer
                 return ItemSerializer
 
+class LoanPagination(pagination.PageNumberPagination):
+        page_size = 20
+        page_size_query_param = 'page_size'
+        max_page_size = 50
+
+        def paginate_queryset(self, queryset, request, view=None):
+                self.loan_summary = view.get_loan_summary() if view else {}
+                return super().paginate_queryset(queryset, request, view)
+
+        def get_paginated_response(self, data):
+                return Response({
+                        'count': self.page.paginator.count,
+                        'next': self.get_next_link(),
+                        'previous': self.get_previous_link(),
+                        'results': data,
+                        'summary': self.loan_summary,
+                })
+
+
 class LoanViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar los préstamos.
@@ -145,17 +166,146 @@ class LoanViewSet(viewsets.ModelViewSet):
         """
         serializer_class = LoanWriteSerializer
         permission_classes = [IsLibrarianOrReadOnly]
+        pagination_class = LoanPagination
+
+        def get_loan_summary(self):
+                user = self.request.user
+                qs = Loan.objects.all()
+                if not is_librarian_or_admin(user):
+                        qs = qs.filter(user=user)
+
+                now = timezone.now()
+                return qs.aggregate(
+                        due_today=Count(
+                                'pk',
+                                filter=Q(
+                                        returned_at__isnull=True,
+                                        due_at__date=timezone.localdate(now),
+                                ),
+                        ),
+                        due_total=Count(
+                                'pk',
+                                filter=Q(returned_at__isnull=True),
+                        ),
+                        overdue=Count(
+                                'pk',
+                                filter=Q(returned_at__isnull=True, due_at__lt=now),
+                        ),
+                )
 
         def get_queryset(self):
                 user = self.request.user
                 base_qs = Loan.objects.select_related('item__book__editorial', 'user')
                 # Bibliotecarios y administradores pueden ver todos los préstamos
                 if is_librarian_or_admin(user):
-                        return base_qs.all()
+                        qs = base_qs.all()
                 # Lectores únicamente pueden ver sus propios préstamos
-                if user.is_authenticated:
-                        return base_qs.filter(user=user)
-                return Loan.objects.none()
+                elif user.is_authenticated:
+                        qs = base_qs.filter(user=user)
+                else:
+                        return Loan.objects.none()
+
+                if self.action != 'list':
+                        return qs
+
+                user_search = self.request.query_params.get('user', '').strip()
+                item_search = self.request.query_params.get('item', '').strip()
+                status_filter = self.request.query_params.get('status', '').strip().lower()
+                ordering = self.request.query_params.get('ordering', '-loaned_at')
+
+                if user_search:
+                        user_query = (
+                                Q(user__first_name__icontains=user_search)
+                                | Q(user__last_name__icontains=user_search)
+                                | Q(user__username__icontains=user_search)
+                                | Q(user__email__icontains=user_search)
+                                | Q(user_full_name__icontains=user_search)
+                        )
+                        if user_search.isdigit() and len(user_search) <= 10:
+                                user_id = int(user_search)
+                                if user_id <= 2_147_483_647:
+                                        user_query |= Q(user_id=user_id)
+                        qs = qs.annotate(
+                                user_full_name=Concat(
+                                        F('user__first_name'),
+                                        Value(' '),
+                                        F('user__last_name'),
+                                )
+                        ).filter(user_query)
+
+                if item_search:
+                        item_query = (
+                                Q(item__inventory_code__icontains=item_search)
+                                | Q(item__book__title__icontains=item_search)
+                        )
+                        if item_search.isdigit():
+                                item_query |= Q(item_id=int(item_search))
+                        qs = qs.filter(item_query)
+
+                valid_statuses = {'active', 'overdue', 'returned'}
+                if status_filter and status_filter not in valid_statuses:
+                        raise ValidationError({
+                                'status': 'Use uno de estos estados: active, overdue, returned.'
+                        })
+                now = timezone.now()
+                if status_filter == 'returned':
+                        qs = qs.filter(returned_at__isnull=False)
+                elif status_filter == 'overdue':
+                        qs = qs.filter(returned_at__isnull=True, due_at__lt=now)
+                elif status_filter == 'active':
+                        qs = qs.filter(returned_at__isnull=True, due_at__gte=now)
+
+                valid_orderings = {
+                        'item', 'id', '-id', 'loaned_at', '-loaned_at',
+                        'remaining', '-remaining',
+                }
+                if ordering not in valid_orderings:
+                        raise ValidationError({
+                                'ordering': 'Ordenamiento inválido.'
+                        })
+
+                if ordering == 'item':
+                        return qs.order_by(
+                                Lower('item__book__title'),
+                                Lower('item__inventory_code'),
+                                'pk',
+                        )
+                if ordering in {'id', '-id'}:
+                        return qs.order_by(ordering)
+                if ordering in {'loaned_at', '-loaned_at'}:
+                        return qs.order_by(ordering, 'pk')
+
+                direction = '-' if ordering == '-remaining' else ''
+                qs = qs.annotate(
+                        loan_status_order=Case(
+                                When(returned_at__isnull=False, then=Value(2)),
+                                When(due_at__lt=now, then=Value(1)),
+                                default=Value(0),
+                                output_field=IntegerField(),
+                        ),
+                        active_due_order=Case(
+                                When(returned_at__isnull=True, due_at__gte=now, then=F('due_at')),
+                                default=Value(None),
+                                output_field=DateTimeField(),
+                        ),
+                        overdue_due_order=Case(
+                                When(returned_at__isnull=True, due_at__lt=now, then=F('due_at')),
+                                default=Value(None),
+                                output_field=DateTimeField(),
+                        ),
+                        returned_date_order=Case(
+                                When(returned_at__isnull=False, then=F('returned_at')),
+                                default=Value(None),
+                                output_field=DateTimeField(),
+                        ),
+                )
+                return qs.order_by(
+                        'loan_status_order',
+                        f'{direction}active_due_order',
+                        f'{direction}overdue_due_order',
+                        f'{direction}returned_date_order',
+                        'pk',
+                )
 
         def get_serializer_class(self):
                 if self.action in ['list', 'retrieve']:
@@ -355,6 +505,26 @@ class GenreViewSet(viewsets.ModelViewSet):
                         qs = qs.filter(name__icontains=search)
                 return qs
 
+
+class EditorialViewSet(viewsets.ModelViewSet):
+        """
+        Controlador para gestionar editoriales.
+        Permite lectura a cualquier usuario (lectura pública) y gestión completa al bibliotecario.
+        Sin paginación por defecto para nutrir selectores de formularios sin recorrer libros.
+        Soporta búsqueda por texto con ?search= o ?q=.
+        """
+        queryset = Editorial.objects.all().order_by('name')
+        serializer_class = EditorialSerializer
+        permission_classes = [IsLibrarianOrPublicReadOnly]
+
+        def get_queryset(self):
+                qs = Editorial.objects.all().order_by('name')
+                search = self.request.query_params.get('search') or self.request.query_params.get('q')
+                if search:
+                        search = search.strip()
+                        qs = qs.filter(name__icontains=search)
+                return qs
+
 class FavoriteViewSet(viewsets.ModelViewSet):
         """
         Controlador para que los usuarios gestionen sus libros favoritos.
@@ -502,6 +672,144 @@ class ReservationViewSet(viewsets.ModelViewSet):
                         return base_qs.filter(user=user)
                 return Reservation.objects.none()
 
+        def filter_queryset_for_list(self, queryset):
+                params = self.request.query_params
+                user_search = params.get('user', '').strip()
+                book_search = params.get('book', '').strip()
+                status_filter = params.get('status', '').strip().lower()
+                ordering = params.get('ordering', '-created_at')
+
+                if user_search:
+                        user_query = (
+                                Q(user__first_name__icontains=user_search)
+                                | Q(user__last_name__icontains=user_search)
+                                | Q(user__username__icontains=user_search)
+                                | Q(user__email__icontains=user_search)
+                                | Q(user_full_name__icontains=user_search)
+                        )
+                        if user_search.isdigit():
+                                user_query |= Q(user_id=int(user_search))
+                        queryset = queryset.annotate(
+                                user_full_name=Concat(
+                                        F('user__first_name'),
+                                        Value(' '),
+                                        F('user__last_name'),
+                                )
+                        ).filter(user_query)
+
+                if book_search:
+                        book_query = (
+                                Q(book__title__icontains=book_search)
+                                | Q(book__isbn__icontains=book_search)
+                        )
+                        if book_search.isdigit() and len(book_search) <= 10:
+                                book_id = int(book_search)
+                                if book_id <= 2_147_483_647:
+                                        book_query |= Q(book_id=book_id)
+                        queryset = queryset.filter(book_query)
+
+                valid_statuses = {'pending', 'expired', 'completed', 'cancelled'}
+                if status_filter and status_filter not in valid_statuses:
+                        raise ValidationError({
+                                'status': 'Use uno de estos estados: pending, expired, completed, cancelled.'
+                        })
+
+                now = timezone.now()
+                if status_filter == 'pending':
+                        queryset = queryset.filter(
+                                status=Reservation.StatusReservation.PENDING,
+                                expires_at__gt=now,
+                        )
+                elif status_filter == 'expired':
+                        queryset = queryset.filter(
+                                Q(status=Reservation.StatusReservation.EXPIRED)
+                                | Q(
+                                        status=Reservation.StatusReservation.PENDING,
+                                        expires_at__lte=now,
+                                )
+                        )
+                elif status_filter == 'completed':
+                        queryset = queryset.filter(
+                                status=Reservation.StatusReservation.COMPLETED
+                        )
+                elif status_filter == 'cancelled':
+                        queryset = queryset.filter(
+                                status=Reservation.StatusReservation.CANCELED
+                        )
+
+                valid_orderings = {'created_at', '-created_at', 'title'}
+                if ordering not in valid_orderings:
+                        raise ValidationError({
+                                'ordering': 'Use created_at, -created_at o title.'
+                        })
+
+                if ordering == 'title':
+                        return queryset.order_by(Lower('book__title'), 'pk').distinct()
+
+                direction = '-' if ordering == '-created_at' else ''
+                queryset = queryset.annotate(
+                        reservation_status_order=Case(
+                                When(
+                                        status=Reservation.StatusReservation.PENDING,
+                                        expires_at__gt=now,
+                                        then=Value(0),
+                                ),
+                                When(
+                                        status=Reservation.StatusReservation.PENDING,
+                                        expires_at__lte=now,
+                                        then=Value(1),
+                                ),
+                                When(
+                                        status=Reservation.StatusReservation.EXPIRED,
+                                        then=Value(1),
+                                ),
+                                When(
+                                        status=Reservation.StatusReservation.COMPLETED,
+                                        then=Value(2),
+                                ),
+                                default=Value(3),
+                                output_field=IntegerField(),
+                        )
+                )
+                return queryset.order_by(
+                        'reservation_status_order',
+                        f'{direction}created_at',
+                        'pk',
+                ).distinct()
+
+        def filter_queryset(self, queryset):
+                queryset = super().filter_queryset(queryset)
+                if self.action == 'list':
+                        return self.filter_queryset_for_list(queryset)
+                return queryset
+
+        @action(detail=False, methods=['get'])
+        def summary(self, request):
+                now = timezone.now()
+                return Response(
+                        self.get_queryset().aggregate(
+                                pending=Count(
+                                        'pk',
+                                        filter=Q(
+                                                status=Reservation.StatusReservation.PENDING,
+                                                expires_at__gt=now,
+                                        ),
+                                ),
+                                completed=Count(
+                                        'pk',
+                                        filter=Q(
+                                                status=Reservation.StatusReservation.COMPLETED
+                                        ),
+                                ),
+                                cancelled=Count(
+                                        'pk',
+                                        filter=Q(
+                                                status=Reservation.StatusReservation.CANCELED
+                                        ),
+                                ),
+                        )
+                )
+
         def perform_create(self, serializer):
                 # Asigna automáticamente el usuario que hace la solicitud
                 serializer.save(user=self.request.user)
@@ -638,4 +946,3 @@ class BookRecommendationView(generics.GenericAPIView):
 
                 serializer = self.get_serializer(books, many=True, context={"request": request})
                 return Response(serializer.data, status=status.HTTP_200_OK)
-

@@ -29,7 +29,7 @@ User = get_user_model()
 # El seed las copia a MEDIA_ROOT/books/covers/ vía cover_image.save(),
 # nunca escribe la ruta a mano.
 COVERS_DIR = Path(__file__).resolve().parent.parent.parent / "seed_assets" / "covers"
-COVER_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"]
+COVER_EXTENSIONS = [".webp", ".jpg", ".jpeg", ".png"]
 
 
 def _find_cover_file(isbn):
