@@ -475,6 +475,10 @@ class CatalogPublicReadOnlyTests(APITestCase):
         response = self.client.get(reverse("folium_api:editorial-list"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+    def test_anon_can_call_book_options(self):
+        response = self.client.get(reverse("folium_api:book-options"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
     def test_reader_cannot_create_editorial(self):
         self.client.force_authenticate(user=self.reader)
         response = self.client.post(
@@ -508,7 +512,6 @@ class CatalogPublicReadOnlyTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(Editorial.objects.filter(name="Editorial Creada Al Vuelo").exists())
-
     def test_anon_cannot_create_book(self):
         response = self.client.post(
             reverse("folium_api:book-list"),
@@ -1104,3 +1107,68 @@ class ReservationListQueryTests(APITestCase):
             summary.data,
             {"pending": 1, "completed": 0, "cancelled": 0},
         )
+
+
+class ReservationCancellationTests(APITestCase):
+    def setUp(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        from .models import Reservation
+
+        self.editorial = Editorial.objects.create(name="Editorial Test")
+        self.book = Book.objects.create(
+            title="Libro Reserva Test",
+            isbn="9780000000099",
+            editorial=self.editorial,
+            publication_year=2024,
+        )
+        self.reader_1 = User.objects.create_user(
+            username="reader1",
+            dni=11111111,
+            email="reader1@example.com",
+            password="test-password",
+            rol=User.Rol.USER,
+        )
+        self.reader_2 = User.objects.create_user(
+            username="reader2",
+            dni=22222222,
+            email="reader2@example.com",
+            password="test-password",
+            rol=User.Rol.USER,
+        )
+        self.librarian = User.objects.create_user(
+            username="librarian-res",
+            dni=33333333,
+            email="librarian-res@example.com",
+            password="test-password",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.reservation = Reservation.objects.create(
+            book=self.book,
+            user=self.reader_1,
+            status=Reservation.StatusReservation.PENDING,
+            expires_at=timezone.now() + timedelta(days=2),
+        )
+
+    def test_reader_can_cancel_own_reservation(self):
+        self.client.force_authenticate(user=self.reader_1)
+        url = reverse("folium_api:reservation-cancel", args=[self.reservation.id])
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.reservation.refresh_from_db()
+        self.assertEqual(self.reservation.status, "CANCELLED")
+
+    def test_reader_cannot_cancel_other_reader_reservation(self):
+        self.client.force_authenticate(user=self.reader_2)
+        url = reverse("folium_api:reservation-cancel", args=[self.reservation.id])
+        response = self.client.post(url)
+        # get_queryset filtra y devuelve 404 al no pertenecerle
+        self.assertIn(response.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND])
+
+    def test_librarian_can_cancel_any_reservation(self):
+        self.client.force_authenticate(user=self.librarian)
+        url = reverse("folium_api:reservation-cancel", args=[self.reservation.id])
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.reservation.refresh_from_db()
+        self.assertEqual(self.reservation.status, "CANCELLED")
