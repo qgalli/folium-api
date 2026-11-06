@@ -243,28 +243,35 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         random.seed(42)  # datos reproducibles
 
-        if options["flush"]:
-            self.stdout.write(self.style.WARNING("Borrando datos existentes de folium_api..."))
-            Review.objects.all().delete()
-            Reservation.objects.all().delete()
-            Loan.objects.all().delete()
-            Item.objects.all().delete()
-            Book.objects.all().delete()
-            Author.objects.all().delete()
-            Genre.objects.all().delete()
-            User.objects.filter(is_superuser=False).delete()
-            User.objects.filter(is_superuser=True, username="admin").delete()
-
         self._validate_data_lengths()
 
         with transaction.atomic():
+            self.stdout.write(self.style.WARNING(
+                "Reiniciando préstamos, reservas y estados de ejemplares..."
+            ))
+            Reservation.objects.all().delete()
+            Loan.objects.all().delete()
+
+            # La seed reconstruye los estados de circulación desde cero.
+            Item.objects.all().update(status=Item.Status.AVAILABLE)
+
+            if options["flush"]:
+                self.stdout.write(self.style.WARNING("Borrando datos existentes de folium_api..."))
+                Review.objects.all().delete()
+                Item.objects.all().delete()
+                Book.objects.all().delete()
+                Author.objects.all().delete()
+                Genre.objects.all().delete()
+                User.objects.filter(is_superuser=False).delete()
+                User.objects.filter(is_superuser=True, username="admin").delete()
+
             genres = self._seed_genres()
             authors = self._seed_authors()
             books = self._seed_books(authors, genres)
             items = self._seed_items(books)
             users = self._seed_users()
-            self._seed_loans(items, users["readers"])
-            self._seed_reservations(books, users["readers"])
+            fully_loaned_books = self._seed_circulation(books, items, users["readers"])
+            self._validate_seeded_circulation(fully_loaned_books)
             self._seed_reviews(books, users["readers"])
 
         self.stdout.write(self.style.SUCCESS("\n✅ Seeds cargados correctamente."))
@@ -358,28 +365,29 @@ class Command(BaseCommand):
 
     # ── Ítems (copias físicas) ──────────────────────────────────────────
     def _seed_items(self, books):
-        items = []
         code_n = 1
         for book in books:
             n_copias = random.choice([1, 2, 2, 3])  # mayoría con 2 copias
             for _ in range(n_copias):
                 code = f"INV-{code_n:05d}"
                 code_n += 1
-                # La mayoría disponibles, algunas prestadas/reservadas, pocas dañadas/perdidas
-                status = random.choices(
-                    [Item.Status.AVAILABLE, Item.Status.LOANED, Item.Status.RESERVED,
-                     Item.Status.DAMAGED, Item.Status.LOST],
-                    weights=[60, 22, 10, 5, 3],
-                )[0]
                 item, created = Item.objects.get_or_create(
                     inventory_code=code,
                     defaults={
                         "book": book,
-                        "status": status,
+                        "status": Item.Status.AVAILABLE,
                         "location": random.choice(UBICACIONES),
                     },
                 )
-                items.append(item)
+                if not created:
+                    item.book = book
+                    item.status = Item.Status.AVAILABLE
+                    item.save(update_fields=["book", "status", "updated_at"])
+        items = list(
+            Item.objects.filter(book__in=books)
+            .select_related("book")
+            .order_by("inventory_code")
+        )
         self.stdout.write(self.style.SUCCESS(f"Ítems (copias): {len(items)}"))
         return items
 
@@ -471,75 +479,200 @@ class Command(BaseCommand):
         ))
         return users
 
-    # ── Préstamos ────────────────────────────────────────────────────────
-    def _seed_loans(self, items, readers):
+    # ── Reservas y préstamos ─────────────────────────────────────────────
+    def _seed_circulation(self, books, items, readers):
         now = timezone.now()
-        loaned_items = [i for i in items if i.status == Item.Status.LOANED]
-        count = 0
+        items_by_book = {}
+        for item in items:
+            items_by_book.setdefault(item.book_id, []).append(item)
 
-        for item in loaned_items:
-            user = random.choice(readers)
-            loaned_at = now - timedelta(days=random.randint(1, 20))
-            due_at = loaned_at + timedelta(days=14)
-            # Se usa el ítem como clave única: un ítem prestado solo tiene un préstamo activo.
-            if not Loan.objects.filter(item=item, returned_at__isnull=True).exists():
-                Loan.objects.create(
-                    item=item,
-                    user=user,
-                    loaned_at=loaned_at,
-                    due_at=due_at,
-                )
-                count += 1
-
-        # Algunos préstamos históricos ya devueltos (sobre ítems disponibles)
-        available_items = [i for i in items if i.status == Item.Status.AVAILABLE]
-        for item in random.sample(available_items, k=min(10, len(available_items))):
-            user = random.choice(readers)
-            loaned_at = now - timedelta(days=random.randint(30, 90))
-            due_at = loaned_at + timedelta(days=14)
-            returned_at = loaned_at + timedelta(days=random.randint(3, 13))
-            if not Loan.objects.filter(item=item, returned_at__isnull=False).exists():
-                Loan.objects.create(
-                    item=item,
-                    user=user,
-                    loaned_at=loaned_at,
-                    due_at=due_at,
-                    returned_at=returned_at,
-                )
-                count += 1
-
-        self.stdout.write(self.style.SUCCESS(f"Préstamos: {count}"))
-
-    # ── Reservas ─────────────────────────────────────────────────────────
-    def _seed_reservations(self, books, readers):
-        now = timezone.now()
-        count = 0
-        sample_books = random.sample(books, k=min(12, len(books)))
         used_pairs = set()
 
-        for book in sample_books:
-            user = random.choice(readers)
-            if (user.id, book.id) in used_pairs:
-                continue
+        def reserve_user_pair(book):
+            eligible_readers = [
+                reader for reader in readers
+                if (reader.id, book.id) not in used_pairs
+            ]
+            if not eligible_readers:
+                raise CommandError(
+                    f"No hay usuarios disponibles para crear otra reserva de '{book.title}'."
+                )
+            user = random.choice(eligible_readers)
             used_pairs.add((user.id, book.id))
-            status = random.choices(
-                [Reservation.StatusReservation.PENDING,
-                 Reservation.StatusReservation.COMPLETED,
-                 Reservation.StatusReservation.CANCELED,
-                 Reservation.StatusReservation.EXPIRED],
-                weights=[40, 30, 15, 15],
-            )[0]
-            expires_at = now + timedelta(days=random.randint(2, 10))
-            if not Reservation.objects.filter(book=book, user=user).exists():
+            return user
+
+        def create_accepted_reservation_and_loan(item, loan_status, damaged=False):
+            book = item.book
+            user = reserve_user_pair(book)
+            Reservation.objects.create(
+                book=book,
+                user=user,
+                status=Reservation.StatusReservation.COMPLETED,
+                expires_at=now + timedelta(days=random.randint(2, 10)),
+            )
+
+            if loan_status == "returned":
+                loaned_at = now - timedelta(days=random.randint(30, 60))
+                due_at = loaned_at + timedelta(days=14)
+                returned_at = loaned_at + timedelta(days=random.randint(3, 13))
+                item.status = (
+                    Item.Status.DAMAGED if damaged else Item.Status.AVAILABLE
+                )
+            elif loan_status == "overdue":
+                loaned_at = now - timedelta(days=random.randint(20, 40))
+                due_at = loaned_at + timedelta(days=14)
+                returned_at = None
+                item.status = Item.Status.LOANED
+            else:
+                loaned_at = now - timedelta(days=random.randint(1, 13))
+                due_at = loaned_at + timedelta(days=14)
+                returned_at = None
+                item.status = Item.Status.LOANED
+
+            Loan.objects.create(
+                item=item,
+                user=user,
+                loaned_at=loaned_at,
+                due_at=due_at,
+                returned_at=returned_at,
+            )
+            item.save(update_fields=["status", "updated_at"])
+
+        eligible_full_books = [
+            book for book in books if len(items_by_book.get(book.id, [])) >= 2
+        ]
+        fully_loaned_books = random.sample(
+            eligible_full_books, k=min(3, len(eligible_full_books))
+        )
+        fully_loaned_ids = {book.id for book in fully_loaned_books}
+        loaned_item_ids = set()
+        loan_counts = {"returned": 0, "overdue": 0, "active": 0}
+
+        # Algunos libros quedan sin copias disponibles: todos sus ejemplares
+        # tienen un préstamo abierto, vencido o todavía vigente.
+        for book in fully_loaned_books:
+            for item in items_by_book[book.id]:
+                loan_status = random.choice(["overdue", "active"])
+                create_accepted_reservation_and_loan(item, loan_status)
+                loan_counts[loan_status] += 1
+                loaned_item_ids.add(item.id)
+
+        remaining_items = [item for item in items if item.id not in loaned_item_ids]
+        scenario_items = {
+            "returned": random.sample(remaining_items, k=min(6, len(remaining_items))),
+        }
+        selected_ids = {item.id for item in scenario_items["returned"]}
+        remaining_items = [item for item in remaining_items if item.id not in selected_ids]
+        scenario_items["overdue"] = random.sample(
+            remaining_items, k=min(5, len(remaining_items))
+        )
+        selected_ids.update(item.id for item in scenario_items["overdue"])
+        remaining_items = [item for item in remaining_items if item.id not in selected_ids]
+        scenario_items["active"] = random.sample(
+            remaining_items, k=min(5, len(remaining_items))
+        )
+
+        returned_items = scenario_items["returned"]
+        damaged_item_ids = set()
+        if returned_items:
+            damaged_count = max(1, len(returned_items) // 5)
+            damaged_item_ids = {
+                item.id for item in random.sample(
+                    returned_items, k=min(damaged_count, len(returned_items))
+                )
+            }
+
+        for loan_status, selected_items in scenario_items.items():
+            for item in selected_items:
+                create_accepted_reservation_and_loan(
+                    item,
+                    loan_status,
+                    damaged=item.id in damaged_item_ids,
+                )
+                loan_counts[loan_status] += 1
+
+        # Estas reservas son independientes: no asignan ni cambian ejemplares.
+        standalone_books = [
+            book for book in books if book.id not in fully_loaned_ids
+        ]
+        standalone_counts = {
+            Reservation.StatusReservation.PENDING: 0,
+            Reservation.StatusReservation.CANCELED: 0,
+        }
+        for status, count in (
+            (Reservation.StatusReservation.PENDING, 8),
+            (Reservation.StatusReservation.CANCELED, 5),
+        ):
+            available_pairs = [
+                (book, reader)
+                for book in standalone_books
+                for reader in readers
+                if (reader.id, book.id) not in used_pairs
+            ]
+            selected_pairs = random.sample(
+                available_pairs, k=min(count, len(available_pairs))
+            )
+            for book, user in selected_pairs:
+                used_pairs.add((user.id, book.id))
                 Reservation.objects.create(
                     book=book,
                     user=user,
                     status=status,
-                    expires_at=expires_at,
+                    expires_at=now + timedelta(days=random.randint(2, 10)),
                 )
-                count += 1
+                standalone_counts[status] += 1
 
-        self.stdout.write(self.style.SUCCESS(f"Reservas: {count}"))
+        self.stdout.write(self.style.SUCCESS(
+            "Reservas independientes: "
+            f"{standalone_counts[Reservation.StatusReservation.PENDING]} pendientes, "
+            f"{standalone_counts[Reservation.StatusReservation.CANCELED]} canceladas; "
+            f"reservas aceptadas con préstamo: {sum(loan_counts.values())}"
+        ))
+        self.stdout.write(self.style.SUCCESS(
+            "Préstamos: "
+            f"{loan_counts['returned']} devueltos, "
+            f"{loan_counts['overdue']} vencidos sin devolver, "
+            f"{loan_counts['active']} vigentes"
+        ))
+        return fully_loaned_books
+
+    def _validate_seeded_circulation(self, fully_loaned_books):
+        loans = list(Loan.objects.select_related("item").all())
+        completed_reservations = list(
+            Reservation.objects.filter(
+                status=Reservation.StatusReservation.COMPLETED
+            ).values_list("book_id", "user_id")
+        )
+        loan_pairs = [
+            (loan.item.book_id, loan.user_id)
+            for loan in loans
+        ]
+        if sorted(loan_pairs) != sorted(completed_reservations):
+            raise CommandError(
+                "La seed generó reservas completadas que no coinciden uno a uno "
+                "con sus préstamos por libro y usuario."
+            )
+
+        for loan in loans:
+            if loan.returned_at is None and loan.item.status != Item.Status.LOANED:
+                raise CommandError(
+                    f"El préstamo abierto #{loan.id} tiene un ejemplar "
+                    f"({loan.item.inventory_code}) que no está prestado."
+                )
+            if (
+                loan.returned_at is not None
+                and loan.item.status not in {Item.Status.AVAILABLE, Item.Status.DAMAGED}
+            ):
+                raise CommandError(
+                    f"El préstamo devuelto #{loan.id} tiene un ejemplar "
+                    f"({loan.item.inventory_code}) en un estado incompatible."
+                )
+
+        for book in fully_loaned_books:
+            if book.items.exclude(status=Item.Status.LOANED).exists():
+                raise CommandError(
+                    f"El libro '{book.title}' debía quedar sin ejemplares disponibles."
+                )
 
     # ── Reseñas ──────────────────────────────────────────────────────────
     def _seed_reviews(self, books, readers):
