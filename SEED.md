@@ -40,20 +40,24 @@ El proyecto cuenta con una señal en `folium_api/apps.py` que ejecuta automátic
 docker compose exec web python manage.py migrate
 ```
 
+**Importante:** con `DEBUG=True`, cada ejecución del seed borra todos los préstamos y reservas existentes y restablece los ejemplares a `AVAILABLE` antes de generar los datos de prueba. Usalo solamente en una base de desarrollo.
+
 Al terminar, la terminal mostrará el resumen de registros creados (géneros, autores, libros, copias/ítems, usuarios, préstamos, reservas y reseñas) junto con las credenciales de acceso.
 
 ---
 
 ## 4. Ejecución y Reinicio Manual del Seeding
 
-Si en cualquier momento necesitás volver a cargar los datos o reiniciar la base sin perder la estructura de tablas, disponés del comando `seed_data`:
+Si en cualquier momento necesitás regenerar los datos de circulación, disponés del comando `seed_data`. Cada ejecución elimina todos los préstamos y reservas actuales y devuelve todos los ejemplares a `AVAILABLE`, pero conserva el catálogo y las cuentas existentes:
 
-### Carga idempotente (no duplica si ya existen):
 ```bash
 docker compose exec web python manage.py seed_data
 ```
 
-### Reinicio total (borra datos existentes y vuelve a sembrar):
+El comando genera reservas pendientes y canceladas que no modifican el inventario, además de reservas completadas junto con un préstamo para el mismo libro y usuario. El esquema no tiene una relación directa entre reserva y préstamo. Incluye préstamos vigentes, vencidos sin devolver y devueltos; algunos ejemplares devueltos quedan en estado `DAMAGED`. También deja algunos libros con todos sus ejemplares prestados.
+
+Para borrar también los datos existentes de catálogo , reseñas y usuarios y volver a crearlos:
+
 ```bash
 docker compose exec web python manage.py seed_data --flush
 ```
