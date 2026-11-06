@@ -392,7 +392,7 @@ class BookViewSet(viewsets.ModelViewSet):
                 """
                 return BookRecommendationView.as_view()(request._request, *args, **kwargs)
 
-        @action(detail=False, methods=['get'], permission_classes=[IsLibrarianOrReadOnly], url_path='options')
+        @action(detail=False, methods=['get'], permission_classes=[IsLibrarianOrPublicReadOnly], url_path='options')
         def options(self, request, *args, **kwargs):
                 """
                 Endpoint liviano sin paginación (máximo 50 resultados) para alimentar
@@ -813,6 +813,55 @@ class ReservationViewSet(viewsets.ModelViewSet):
         def perform_create(self, serializer):
                 # Asigna automáticamente el usuario que hace la solicitud
                 serializer.save(user=self.request.user)
+
+        def perform_destroy(self, instance):
+                # Permite eliminar la reserva si es suya o si es bibliotecario/admin
+                user = self.request.user
+                if not (is_librarian_or_admin(user) or instance.user_id == user.id):
+                        raise permissions.exceptions.PermissionDenied("No tienes permiso para eliminar esta reserva.")
+                instance.delete()
+
+        @action(detail=True, methods=['post', 'patch'], url_path='cancel')
+        def cancel(self, request, pk=None):
+                """
+                Cancela o rechaza una reserva:
+                - Lectores: pueden cancelar sus propias reservas pendientes.
+                - Bibliotecarios/Admin: pueden cancelar o rechazar cualquier reserva.
+                Al cancelarse, el cupo del libro se libera de inmediato (status pasa a CANCELLED).
+                """
+                reservation = self.get_object()
+                user = request.user
+
+                # Verificación de permisos de autoría o rol
+                if not (is_librarian_or_admin(user) or reservation.user_id == user.id):
+                        return Response(
+                                {"detail": "No tienes permiso para cancelar esta reserva."},
+                                status=status.HTTP_403_FORBIDDEN
+                        )
+
+                # Si ya estaba cancelada o completada
+                if reservation.status == Reservation.StatusReservation.CANCELED:
+                        return Response(
+                                {"detail": "La reserva ya se encuentra cancelada."},
+                                status=status.HTTP_400_BAD_REQUEST
+                        )
+                if reservation.status == Reservation.StatusReservation.COMPLETED:
+                        return Response(
+                                {"detail": "No se puede cancelar una reserva que ya fue completada (convertida en préstamo)."},
+                                status=status.HTTP_400_BAD_REQUEST
+                        )
+
+                reservation.status = Reservation.StatusReservation.CANCELED
+                reservation.save(update_fields=['status', 'updated_at'])
+
+                serializer = self.get_serializer(reservation)
+                return Response(
+                        {
+                                "detail": "Reserva cancelada correctamente. El ejemplar queda disponible.",
+                                "reservation": serializer.data
+                        },
+                        status=status.HTTP_200_OK
+                )
 
 
 class ReviewViewSet(viewsets.ModelViewSet):
