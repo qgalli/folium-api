@@ -371,6 +371,40 @@ class BookViewSet(viewsets.ModelViewSet):
                         return BookDetailSerializer
                 return BookWriteSerializer
 
+        def perform_destroy(self, instance):
+                from django.db.models import ProtectedError
+
+                # Regla 1: No se puede eliminar si hay préstamos activos (ítem no devuelto)
+                has_active_loans = Loan.objects.filter(
+                        item__book=instance,
+                        returned_at__isnull=True,
+                ).exists()
+                if has_active_loans:
+                        raise ValidationError(
+                                "No se puede eliminar el libro porque tiene préstamos activos sin devolver."
+                        )
+
+                # Regla 2: No se puede eliminar si hay reservas pendientes vigentes
+                has_pending_reservations = instance.reservations.filter(
+                        status=Reservation.StatusReservation.PENDING,
+                ).exists()
+                if has_pending_reservations:
+                        raise ValidationError(
+                                "No se puede eliminar el libro porque tiene reservas pendientes."
+                        )
+
+                # Regla 3: Si tiene ítems (sin préstamos activos ni reservas), el PROTECT
+                # de la BD lo bloquearía igualmente → se captura y se informa con claridad.
+                try:
+                        # Soft delete: marca como eliminado sin borrar el registro físicamente
+                        instance.deleted_at = timezone.now()
+                        instance.save(update_fields=["deleted_at"])
+                except ProtectedError:
+                        raise ValidationError(
+                                "No se puede eliminar el libro porque tiene ejemplares registrados en el inventario. "
+                                "Eliminá primero todos los ejemplares asociados."
+                        )
+
         @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny], url_path='random')
         def random_book(self, request, *args, **kwargs):
                 """
