@@ -215,11 +215,27 @@ class MercadoPagoService:
     API_BASE_URL = "https://api.mercadopago.com"
 
     def __init__(self):
-        self.access_token = os.environ.get("MP_ACCESS_TOKEN", "").strip()
-        self.public_key = os.environ.get("MP_PUBLIC_KEY", "").strip()
-        self.webhook_secret = os.environ.get("MP_WEBHOOK_SECRET", "").strip()
+        self.access_token = (
+            os.environ.get("MP_ACCESS_TOKEN")
+            or os.environ.get("MERCADOPAGO_ACCESS_TOKEN")
+            or ""
+        ).strip()
+        self.public_key = (
+            os.environ.get("MP_PUBLIC_KEY")
+            or os.environ.get("MERCADOPAGO_PUBLIC_KEY")
+            or ""
+        ).strip()
+        self.webhook_secret = (
+            os.environ.get("MP_WEBHOOK_SECRET")
+            or os.environ.get("MERCADOPAGO_WEBHOOK_SECRET")
+            or ""
+        ).strip()
         self.frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:5173").rstrip("/")
-        self.backend_url = os.environ.get("BACKEND_PUBLIC_URL", "http://localhost:8080").rstrip("/")
+        self.backend_url = (
+            os.environ.get("BACKEND_PUBLIC_URL")
+            or os.environ.get("BACKEND_URL")
+            or "http://localhost:8080"
+        ).rstrip("/")
 
     @property
     def is_configured(self) -> bool:
