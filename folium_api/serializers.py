@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
@@ -577,7 +578,8 @@ class BookListSerializer(serializers.ModelSerializer):
     def get_available_items(self, obj):
         available = obj.items.filter(status=Item.Status.AVAILABLE).count()
         pending_reservations = obj.reservations.filter(
-            status=Reservation.StatusReservation.PENDING
+            status=Reservation.StatusReservation.PENDING,
+            item__isnull=True,
         ).count()
         return max(0, available - pending_reservations)
 
@@ -658,7 +660,8 @@ class BookDetailSerializer(serializers.ModelSerializer):
     def get_available_items(self, obj):
         available = obj.items.filter(status=Item.Status.AVAILABLE).count()
         pending_reservations = obj.reservations.filter(
-            status=Reservation.StatusReservation.PENDING
+            status=Reservation.StatusReservation.PENDING,
+            item__isnull=True,
         ).count()
         return max(0, available - pending_reservations)
 
@@ -735,7 +738,8 @@ class BookRecommendationSerializer(serializers.ModelSerializer):
     def get_available_items(self, obj):
         available = obj.items.filter(status=Item.Status.AVAILABLE).count()
         pending_reservations = obj.reservations.filter(
-            status=Reservation.StatusReservation.PENDING
+            status=Reservation.StatusReservation.PENDING,
+            item__isnull=True,
         ).count()
         return max(0, available - pending_reservations)
 
@@ -776,6 +780,7 @@ class LoanWriteSerializer(serializers.ModelSerializer):
         due_at = attrs.get("due_at", getattr(self.instance, "due_at", None))
         returned_at = attrs.get("returned_at", getattr(self.instance, "returned_at", None))
         item = attrs.get("item", getattr(self.instance, "item", None))
+        user = attrs.get("user", getattr(self.instance, "user", None))
 
         # 1. Validaciones de fechas
         if due_at and loaned_at and due_at <= loaned_at:
@@ -792,18 +797,42 @@ class LoanWriteSerializer(serializers.ModelSerializer):
                 active_loan = active_loan.exclude(pk=self.instance.pk)
             
             is_new_or_different_item = not self.instance or self.instance.item != item
-            if active_loan.exists() or (is_new_or_different_item and item.status != Item.Status.AVAILABLE):
+            has_matching_reservation = (
+                user is not None
+                and Reservation.objects.filter(
+                    item=item,
+                    user=user,
+                    status=Reservation.StatusReservation.PENDING,
+                    expires_at__gt=timezone.now(),
+                ).exists()
+            )
+            if active_loan.exists() or (
+                is_new_or_different_item
+                and item.status != Item.Status.AVAILABLE
+                and not (
+                    item.status == Item.Status.RESERVED
+                    and has_matching_reservation
+                )
+            ):
                 raise serializers.ValidationError({"item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."})
         
         return attrs
 
     def create(self, validated_data):
-        loan = super().create(validated_data)
-        # Marcar el ejemplar como PRESTADO al momento del alta
-        item = loan.item
-        item.status = Item.Status.LOANED
-        item.save()
-        return loan
+        with transaction.atomic():
+            loan = super().create(validated_data)
+            item = loan.item
+            item.status = Item.Status.LOANED
+            item.save()
+            reservation = Reservation.objects.filter(
+                item=item,
+                user=loan.user,
+                status=Reservation.StatusReservation.PENDING,
+            ).first()
+            if reservation:
+                reservation.status = Reservation.StatusReservation.COMPLETED
+                reservation.save(update_fields=["status", "updated_at"])
+            return loan
 
     def update(self, instance, validated_data):
         previous_item = instance.item

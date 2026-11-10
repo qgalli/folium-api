@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
 import random
+from django.db import transaction
 from django.db.models import Avg, Case, Count, DateTimeField, F, IntegerField, Q, Value, When
 from django.db.models.functions import Concat, Lower
 from django.utils import timezone
@@ -845,15 +846,64 @@ class ReservationViewSet(viewsets.ModelViewSet):
                 )
 
         def perform_create(self, serializer):
-                # Asigna automáticamente el usuario que hace la solicitud
-                serializer.save(user=self.request.user)
+                with transaction.atomic():
+                        reservation = serializer.save(user=self.request.user)
+                        if reservation.status == Reservation.StatusReservation.PENDING:
+                                self._assign_available_item(reservation)
+
+        def _assign_available_item(self, reservation):
+                item = (
+                        Item.objects.select_for_update()
+                        .filter(
+                                book_id=reservation.book_id,
+                                status=Item.Status.AVAILABLE,
+                        )
+                        .order_by('pk')
+                        .first()
+                )
+                if item:
+                        item.status = Item.Status.RESERVED
+                        item.save(update_fields=['status', 'updated_at'])
+                        reservation.item = item
+                        reservation.save(update_fields=['item', 'updated_at'])
+
+        @staticmethod
+        def _release_reserved_item(reservation):
+                item = reservation.item
+                if item:
+                        if item.status == Item.Status.RESERVED:
+                                item.status = Item.Status.AVAILABLE
+                                item.save(update_fields=['status', 'updated_at'])
+                        reservation.item = None
+
+        def perform_update(self, serializer):
+                with transaction.atomic():
+                        previous_book_id = serializer.instance.book_id
+                        reservation = serializer.save()
+                        if (
+                                reservation.item_id
+                                and (
+                                        reservation.status != Reservation.StatusReservation.PENDING
+                                        or reservation.book_id != previous_book_id
+                                )
+                        ):
+                                self._release_reserved_item(reservation)
+                                reservation.save(update_fields=['item', 'updated_at'])
+
+                        if (
+                                reservation.status == Reservation.StatusReservation.PENDING
+                                and not reservation.item_id
+                        ):
+                                self._assign_available_item(reservation)
 
         def perform_destroy(self, instance):
                 # Permite eliminar la reserva si es suya o si es bibliotecario/admin
                 user = self.request.user
                 if not (is_librarian_or_admin(user) or instance.user_id == user.id):
                         raise permissions.exceptions.PermissionDenied("No tienes permiso para eliminar esta reserva.")
-                instance.delete()
+                with transaction.atomic():
+                        self._release_reserved_item(instance)
+                        instance.delete()
 
         @action(detail=True, methods=['post', 'patch'], url_path='cancel')
         def cancel(self, request, pk=None):
@@ -885,8 +935,10 @@ class ReservationViewSet(viewsets.ModelViewSet):
                                 status=status.HTTP_400_BAD_REQUEST
                         )
 
-                reservation.status = Reservation.StatusReservation.CANCELED
-                reservation.save(update_fields=['status', 'updated_at'])
+                with transaction.atomic():
+                        reservation.status = Reservation.StatusReservation.CANCELED
+                        self._release_reserved_item(reservation)
+                        reservation.save(update_fields=['status', 'item', 'updated_at'])
 
                 serializer = self.get_serializer(reservation)
                 return Response(

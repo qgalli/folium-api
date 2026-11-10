@@ -262,6 +262,7 @@ class Reservation(models.Model):
         EXPIRED = 'EXPIRED', 'Expirado'
 
     book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='reservations')
+    item = models.ForeignKey(Item, on_delete=models.SET_NULL, related_name='reservations', null=True, blank=True)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='reservations')
     status = models.CharField(max_length=20, choices=StatusReservation.choices, default=StatusReservation.PENDING)
     expires_at = models.DateTimeField()

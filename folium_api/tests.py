@@ -1122,6 +1122,11 @@ class ReservationCancellationTests(APITestCase):
             editorial=self.editorial,
             publication_year=2024,
         )
+        self.item = Item.objects.create(
+            book=self.book,
+            inventory_code="RES-001",
+            status=Item.Status.RESERVED,
+        )
         self.reader_1 = User.objects.create_user(
             username="reader1",
             dni=11111111,
@@ -1145,10 +1150,88 @@ class ReservationCancellationTests(APITestCase):
         )
         self.reservation = Reservation.objects.create(
             book=self.book,
+            item=self.item,
             user=self.reader_1,
             status=Reservation.StatusReservation.PENDING,
             expires_at=timezone.now() + timedelta(days=2),
         )
+
+    def test_creating_pending_reservation_reserves_one_available_item(self):
+        self.reservation.delete()
+        self.item.status = Item.Status.AVAILABLE
+        self.item.save(update_fields=["status"])
+        second_item = Item.objects.create(
+            book=self.book,
+            inventory_code="RES-002",
+            status=Item.Status.AVAILABLE,
+        )
+        self.client.force_authenticate(user=self.reader_2)
+
+        response = self.client.post(
+            reverse("folium_api:reservation-list"),
+            {
+                "book": self.book.id,
+                "expires_at": (timezone.now() + timedelta(days=2)).isoformat(),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        reservation = Reservation.objects.get(pk=response.data["id"])
+        self.item.refresh_from_db()
+        second_item.refresh_from_db()
+        self.assertEqual(reservation.status, Reservation.StatusReservation.PENDING)
+        self.assertEqual(reservation.item_id, self.item.id)
+        self.assertEqual(self.item.status, Item.Status.RESERVED)
+        self.assertEqual(second_item.status, Item.Status.AVAILABLE)
+
+    def test_pending_reservation_without_available_item_keeps_no_item_assigned(self):
+        self.client.force_authenticate(user=self.reader_2)
+
+        response = self.client.post(
+            reverse("folium_api:reservation-list"),
+            {
+                "book": self.book.id,
+                "expires_at": (timezone.now() + timedelta(days=2)).isoformat(),
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        reservation = Reservation.objects.get(pk=response.data["id"])
+        self.assertEqual(reservation.status, Reservation.StatusReservation.PENDING)
+        self.assertIsNone(reservation.item_id)
+
+    def test_reserved_item_can_be_loaned_to_its_reserving_user(self):
+        self.client.force_authenticate(user=self.librarian)
+
+        response = self.client.post(
+            reverse("folium_api:loan-list"),
+            {"item": self.item.id, "user": self.reader_1.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.reservation.refresh_from_db()
+        self.item.refresh_from_db()
+        self.assertEqual(
+            self.reservation.status,
+            Reservation.StatusReservation.COMPLETED,
+        )
+        self.assertEqual(self.item.status, Item.Status.LOANED)
+
+    def test_reserved_item_cannot_be_loaned_to_another_user(self):
+        self.client.force_authenticate(user=self.librarian)
+
+        response = self.client.post(
+            reverse("folium_api:loan-list"),
+            {"item": self.item.id, "user": self.reader_2.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.status, Item.Status.RESERVED)
 
     def test_reader_can_cancel_own_reservation(self):
         self.client.force_authenticate(user=self.reader_1)
@@ -1156,7 +1239,24 @@ class ReservationCancellationTests(APITestCase):
         response = self.client.post(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.reservation.refresh_from_db()
+        self.item.refresh_from_db()
         self.assertEqual(self.reservation.status, "CANCELLED")
+        self.assertIsNone(self.reservation.item_id)
+        self.assertEqual(self.item.status, Item.Status.AVAILABLE)
+
+    def test_updating_pending_reservation_releases_its_item(self):
+        self.client.force_authenticate(user=self.reader_1)
+        response = self.client.patch(
+            reverse("folium_api:reservation-detail", args=[self.reservation.id]),
+            {"status": Reservation.StatusReservation.CANCELED},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.reservation.refresh_from_db()
+        self.item.refresh_from_db()
+        self.assertIsNone(self.reservation.item_id)
+        self.assertEqual(self.item.status, Item.Status.AVAILABLE)
 
     def test_reader_cannot_cancel_other_reader_reservation(self):
         self.client.force_authenticate(user=self.reader_2)
