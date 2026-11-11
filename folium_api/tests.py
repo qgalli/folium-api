@@ -689,7 +689,7 @@ class LoanListQueryTests(APITestCase):
         due_today_at = timezone.make_aware(
             datetime.combine(timezone.localdate(now), time(23, 59, 59))
         )
-        self.create_loan("Libro para hoy", "INV-HOY", due_today_at)
+        due_today = self.create_loan("Libro para hoy", "INV-HOY", due_today_at)
 
         response = self.client.get(
             reverse("folium_api:loan-list"),
@@ -710,10 +710,10 @@ class LoanListQueryTests(APITestCase):
             },
         )
 
-        for status_filter, expected in (
-            ("active", active),
-            ("overdue", overdue),
-            ("returned", returned),
+        for status_filter, expected_ids in (
+            ("active", [due_today.id, active.id]),
+            ("overdue", [overdue.id]),
+            ("returned", [returned.id]),
         ):
             with self.subTest(status=status_filter):
                 response = self.client.get(
@@ -723,7 +723,7 @@ class LoanListQueryTests(APITestCase):
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 self.assertEqual(
                     [row["id"] for row in response.data["results"]],
-                    [expected.id],
+                    expected_ids,
                 )
 
     def test_remaining_sort_keeps_active_overdue_and_returned_groups(self):
@@ -1272,3 +1272,42 @@ class ReservationCancellationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.reservation.refresh_from_db()
         self.assertEqual(self.reservation.status, "CANCELLED")
+
+
+class BillingMercadoPagoTests(APITestCase):
+    def test_billing_plans_list(self):
+        url = reverse("folium_api:billing-plans")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("plans", response.data)
+        self.assertIn("gateway", response.data)
+        plan_codes = [p["code"] for p in response.data["plans"]]
+        self.assertIn("BASIC", plan_codes)
+        self.assertIn("PRO", plan_codes)
+        self.assertIn("PREMIUM", plan_codes)
+
+    def test_checkout_preference_validation_error_on_invalid_plan(self):
+        url = reverse("folium_api:billing-checkout")
+        payload = {
+            "plan_code": "INVALID_PLAN",
+            "billing_cycle": "MONTHLY",
+            "organization_name": "Biblioteca San Martín",
+        }
+        response = self.client.post(url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("plan_code", response.data)
+
+    def test_checkout_preference_valid_payload(self):
+        url = reverse("folium_api:billing-checkout")
+        payload = {
+            "plan_code": "BASIC",
+            "billing_cycle": "MONTHLY",
+            "organization_name": "Biblioteca Central",
+            "payer_email": "admin@biblioteca.org",
+        }
+        response = self.client.post(url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["success"])
+        self.assertIn("checkout", response.data)
+        self.assertIn("preference_id", response.data["checkout"])
+        self.assertIn("init_point", response.data["checkout"])
