@@ -1185,7 +1185,7 @@ class ReservationCancellationTests(APITestCase):
         self.assertEqual(self.item.status, Item.Status.RESERVED)
         self.assertEqual(second_item.status, Item.Status.AVAILABLE)
 
-    def test_pending_reservation_without_available_item_keeps_no_item_assigned(self):
+    def test_pending_reservation_without_available_item_fails_validation(self):
         self.client.force_authenticate(user=self.reader_2)
 
         response = self.client.post(
@@ -1197,10 +1197,8 @@ class ReservationCancellationTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        reservation = Reservation.objects.get(pk=response.data["id"])
-        self.assertEqual(reservation.status, Reservation.StatusReservation.PENDING)
-        self.assertIsNone(reservation.item_id)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", response.data)
 
     def test_reserved_item_can_be_loaned_to_its_reserving_user(self):
         self.client.force_authenticate(user=self.librarian)

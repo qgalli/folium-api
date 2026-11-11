@@ -847,11 +847,27 @@ class ReservationViewSet(viewsets.ModelViewSet):
 
         def perform_create(self, serializer):
                 with transaction.atomic():
-                        reservation = serializer.save(user=self.request.user)
-                        if reservation.status == Reservation.StatusReservation.PENDING:
-                                self._assign_available_item(reservation)
+                        book = serializer.validated_data.get('book')
+                        item = (
+                                Item.objects.select_for_update()
+                                .filter(
+                                        book=book,
+                                        status=Item.Status.AVAILABLE,
+                                )
+                                .order_by('pk')
+                                .first()
+                        )
+                        if not item:
+                                raise ValidationError({
+                                        'detail': 'No hay ejemplares disponibles para este libro en este momento.'
+                                })
 
-        def _assign_available_item(self, reservation):
+                        item.status = Item.Status.RESERVED
+                        item.save(update_fields=['status', 'updated_at'])
+                        serializer.save(user=self.request.user, item=item)
+
+        @staticmethod
+        def _assign_available_item(reservation):
                 item = (
                         Item.objects.select_for_update()
                         .filter(
