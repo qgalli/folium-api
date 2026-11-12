@@ -237,6 +237,15 @@ class MercadoPagoService:
             or "http://localhost:8080"
         ).rstrip("/")
 
+        # Configuración del SDK oficial si la librería mercadopago está instalada
+        self.sdk = None
+        if self.access_token:
+            try:
+                import mercadopago
+                self.sdk = mercadopago.SDK(self.access_token)
+            except ImportError:
+                self.sdk = None
+
     @property
     def is_configured(self) -> bool:
         """Indica si existe un Access Token real o de prueba de MercadoPago."""
@@ -245,9 +254,35 @@ class MercadoPagoService:
     def _mp_request(self, method: str, endpoint: str, payload: dict = None, idempotency_key: str = None) -> dict:
         """
         Ejecuta una petición HTTPS hacia la API de MercadoPago.
-        Intenta usar el SDK oficial `mercadopago` si está instalado, o bien realiza
-        la llamada HTTPS directa con cabeceras de seguridad e idempotencia (`X-Idempotency-Key`).
+        Si el SDK oficial `mercadopago` está disponible, delega la creación de preferencias
+        o llamadas a través de él; de lo contrario realiza la llamada HTTPS directa
+        con cabeceras de seguridad e idempotencia (`X-Idempotency-Key`).
         """
+        # Si disponemos del SDK oficial y es la creación de preferencia
+        if self.sdk and method == "POST" and endpoint == "/checkout/preferences" and payload:
+            try:
+                from mercadopago.config.request_options import RequestOptions
+
+                request_options = None
+                if idempotency_key:
+                    request_options = RequestOptions(
+                        custom_headers={"X-Idempotency-Key": idempotency_key}
+                    )
+                pref_res = self.sdk.preference().create(
+                    payload, request_options=request_options
+                )
+                status_code = pref_res.get("status")
+                response_data = pref_res.get("response", {})
+                if status_code in (200, 201):
+                    return response_data
+                raise MercadoPagoServiceError(
+                    f"MercadoPago SDK rechazó la solicitud ({status_code}): {response_data}"
+                )
+            except Exception as sdk_err:
+                if isinstance(sdk_err, MercadoPagoServiceError):
+                    raise sdk_err
+                logger.warning("Fallo en llamada via SDK mercadopago (%s), reintentando HTTP directo", str(sdk_err))
+
         url = f"{self.API_BASE_URL}{endpoint}"
         headers = {
             "Authorization": f"Bearer {self.access_token}",
@@ -325,7 +360,6 @@ class MercadoPagoService:
                 "failure": f"{self.frontend_url}/pricing?payment_status=rejected&plan={plan_code}&cycle={cycle}",
                 "pending": f"{self.frontend_url}/pricing?payment_status=pending&plan={plan_code}&cycle={cycle}",
             },
-            "auto_return": "approved",
             "external_reference": external_reference,
             "statement_descriptor": "FOLIUM BIBLIO",
             "binary_mode": False,
@@ -337,6 +371,13 @@ class MercadoPagoService:
                 "tax_id": tax_id,
             },
         }
+
+        # auto_return solo es valido si el frontend es una URL publica y alcanzable
+        # desde los servidores de MercadoPago (HTTPS). En localhost/desarrollo se
+        # omite para evitar el error 400:
+        # "auto_return invalid. back_url.success must be defined".
+        if self.frontend_url.startswith("https://"):
+            preference_payload["auto_return"] = "approved"
 
         # Si el backend tiene una URL pública HTTPS configurada, añadimos notification_url
         if self.backend_url.startswith("https://"):
