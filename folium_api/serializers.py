@@ -611,9 +611,22 @@ class BookListSerializer(serializers.ModelSerializer):
         ]
 
     def get_total_items(self, obj):
+        # Si los items ya fueron precargados por prefetch_related, se cuentan en memoria (0 queries SQL)
+        if hasattr(obj, '_prefetched_objects_cache') and 'items' in obj._prefetched_objects_cache:
+            return len(obj.items.all())
         return obj.items.count()
 
     def get_available_items(self, obj):
+        # Si items y reservations fueron precargados, se calculan en memoria (0 queries SQL)
+        if hasattr(obj, '_prefetched_objects_cache') and 'items' in obj._prefetched_objects_cache and 'reservations' in obj._prefetched_objects_cache:
+            available = sum(1 for item in obj.items.all() if item.status == Item.Status.AVAILABLE)
+            pending_reservations = sum(
+                1 for res in obj.reservations.all()
+                if res.status == Reservation.StatusReservation.PENDING and res.item_id is None
+            )
+            return max(0, available - pending_reservations)
+
+        # Fallback normal si la vista no utilizó prefetch_related
         available = obj.items.filter(status=Item.Status.AVAILABLE).count()
         pending_reservations = obj.reservations.filter(
             status=Reservation.StatusReservation.PENDING,
