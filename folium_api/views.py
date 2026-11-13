@@ -1066,16 +1066,20 @@ class RandomBookView(generics.GenericAPIView):
                         if genre_qs.exists():
                                 qs = genre_qs
 
-                book_ids = list(qs.values_list("id", flat=True).distinct())
-                if not book_ids:
+                # Optimización de muestreo aleatorio en BD sin cargar listas de IDs a RAM
+                qs = qs.distinct()
+                total_count = qs.count()
+                if total_count == 0:
                         return Response(
                                 {"detail": "No se encontraron libros disponibles en el catálogo."},
                                 status=status.HTTP_404_NOT_FOUND,
                         )
 
-                random_id = random.choice(book_ids)
+                random_index = random.randint(0, total_count - 1)
+                random_book_id = qs.values_list("id", flat=True)[random_index]
+
                 book = (
-                        Book.objects.filter(id=random_id, deleted_at__isnull=True)
+                        Book.objects.filter(id=random_book_id, deleted_at__isnull=True)
                         .annotate(
                                 avg_rating=Avg(
                                         "reviews__rating",
