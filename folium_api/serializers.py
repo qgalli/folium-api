@@ -469,10 +469,18 @@ class BookAvailableOptionSerializer(serializers.ModelSerializer):
             "available_count",
         ]
     def get_available_items(self, obj):
-        items = obj.items.filter(status=Item.Status.AVAILABLE)
-        return ItemSummarySerializer(items, many=True).data
+        # Prefetch en memoria: 0 queries SQL adicionales
+        if hasattr(obj, '_prefetched_objects_cache') and 'items' in obj._prefetched_objects_cache:
+            available = [i for i in obj.items.all() if i.status == Item.Status.AVAILABLE]
+            return ItemSummarySerializer(available, many=True).data
+        # Fallback
+        return ItemSummarySerializer(obj.items.filter(status=Item.Status.AVAILABLE), many=True).data
 
     def get_available_count(self, obj):
+        # Prefetch en memoria: 0 queries SQL adicionales
+        if hasattr(obj, '_prefetched_objects_cache') and 'items' in obj._prefetched_objects_cache:
+            return sum(1 for i in obj.items.all() if i.status == Item.Status.AVAILABLE)
+        # Fallback
         return obj.items.filter(status=Item.Status.AVAILABLE).count()
 
 
@@ -706,9 +714,18 @@ class BookDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_total_items(self, obj):
+        if hasattr(obj, '_prefetched_objects_cache') and 'items' in obj._prefetched_objects_cache:
+            return len(obj.items.all())
         return obj.items.count()
 
     def get_available_items(self, obj):
+        if hasattr(obj, '_prefetched_objects_cache') and 'items' in obj._prefetched_objects_cache and 'reservations' in obj._prefetched_objects_cache:
+            available = sum(1 for i in obj.items.all() if i.status == Item.Status.AVAILABLE)
+            pending = sum(
+                1 for r in obj.reservations.all()
+                if r.status == Reservation.StatusReservation.PENDING and r.item_id is None
+            )
+            return max(0, available - pending)
         available = obj.items.filter(status=Item.Status.AVAILABLE).count()
         pending_reservations = obj.reservations.filter(
             status=Reservation.StatusReservation.PENDING,
@@ -784,9 +801,18 @@ class BookRecommendationSerializer(serializers.ModelSerializer):
         return round(float(avg_aggregate), 2) if avg_aggregate is not None else None
 
     def get_total_items(self, obj):
+        if hasattr(obj, '_prefetched_objects_cache') and 'items' in obj._prefetched_objects_cache:
+            return len(obj.items.all())
         return obj.items.count()
 
     def get_available_items(self, obj):
+        if hasattr(obj, '_prefetched_objects_cache') and 'items' in obj._prefetched_objects_cache and 'reservations' in obj._prefetched_objects_cache:
+            available = sum(1 for i in obj.items.all() if i.status == Item.Status.AVAILABLE)
+            pending = sum(
+                1 for r in obj.reservations.all()
+                if r.status == Reservation.StatusReservation.PENDING and r.item_id is None
+            )
+            return max(0, available - pending)
         available = obj.items.filter(status=Item.Status.AVAILABLE).count()
         pending_reservations = obj.reservations.filter(
             status=Reservation.StatusReservation.PENDING,
