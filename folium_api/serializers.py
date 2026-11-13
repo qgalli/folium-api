@@ -523,6 +523,15 @@ class BookWriteSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
         ]
+        extra_kwargs = {
+            "isbn": {
+                # Desactivamos el UniqueValidator automático de DRF sobre la tabla completa
+                # para que validate_isbn verifique unicidad solo contra libros activos,
+                # permitiendo reactivar libros dados de baja (soft deleted).
+                "validators": [],
+            }
+        }
+
     def validate_isbn(self, value):
         if not value:
             return None
@@ -531,6 +540,14 @@ class BookWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("El ISBN solo puede contener números (y guiones).")
         if len(clean_isbn) not in (10, 13):
             raise serializers.ValidationError("El ISBN debe tener exactamente 10 o 13 dígitos.")
+
+        # Validar unicidad únicamente contra libros activos
+        active_books = Book.objects.filter(isbn=clean_isbn, deleted_at__isnull=True)
+        if self.instance:
+            active_books = active_books.exclude(pk=self.instance.pk)
+        if active_books.exists():
+            raise serializers.ValidationError("Ya existe un libro activo registrado con este ISBN.")
+
         return clean_isbn
 
     def validate_publication_year(self, value):
@@ -540,6 +557,27 @@ class BookWriteSerializer(serializers.ModelSerializer):
         if value < 868:
             raise serializers.ValidationError("El año de publicación no puede ser anterior al año 868 d.C.")
         return value
+
+    def create(self, validated_data):
+        isbn = validated_data.get('isbn')
+        # Si el libro ya existía pero estaba eliminado lógicamente (soft deleted),
+        # se reactiva actualizando sus datos en lugar de intentar un nuevo INSERT (que fallaría por UNIQUE de BD).
+        if isbn:
+            deleted_book = Book.objects.filter(isbn=isbn, deleted_at__isnull=False).first()
+            if deleted_book:
+                authors = validated_data.pop('authors', None)
+                genres = validated_data.pop('genres', None)
+                for attr, val in validated_data.items():
+                    setattr(deleted_book, attr, val)
+                deleted_book.deleted_at = None
+                deleted_book.save()
+                if authors is not None:
+                    deleted_book.authors.set(authors)
+                if genres is not None:
+                    deleted_book.genres.set(genres)
+                return deleted_book
+
+        return super().create(validated_data)
     
 
 class BookListSerializer(serializers.ModelSerializer):

@@ -324,13 +324,25 @@ class BookViewSet(viewsets.ModelViewSet):
         Controlador para gestionar los libros (catálogo).
         Permite lectura a lectores y gestión completa al bibliotecario.
         """
-        queryset = Book.objects.select_related('editorial').prefetch_related('authors', 'genres')
+        queryset = Book.objects.filter(deleted_at__isnull=True).select_related('editorial').prefetch_related('authors', 'genres')
         serializer_class = BookWriteSerializer
         permission_classes = [IsLibrarianOrPublicReadOnly]
         pagination_class = BookPagination
 
         def get_queryset(self):
-                qs = Book.objects.select_related('editorial').prefetch_related('authors', 'genres')
+                user = self.request.user
+                is_staff_or_lib = is_librarian_or_admin(user)
+                deleted_only = self.request.query_params.get('deleted_only') in ['true', '1', 'True']
+                include_deleted = self.request.query_params.get('include_deleted') in ['true', '1', 'True']
+
+                if is_staff_or_lib and deleted_only:
+                        qs = Book.objects.filter(deleted_at__isnull=False)
+                elif is_staff_or_lib and include_deleted:
+                        qs = Book.objects.all()
+                else:
+                        qs = Book.objects.filter(deleted_at__isnull=True)
+
+                qs = qs.select_related('editorial').prefetch_related('authors', 'genres')
                 if self.action in ['list', 'retrieve']:
                         qs = qs.prefetch_related('items', 'reservations')
 
@@ -434,7 +446,7 @@ class BookViewSet(viewsets.ModelViewSet):
                 selectores y buscadores en formularios (ItemForm, ItemEditModal).
                 Soporta búsqueda por texto con ?search= o ?q=.
                 """
-                qs = Book.objects.all()
+                qs = Book.objects.filter(deleted_at__isnull=True)
                 search = request.query_params.get('search') or request.query_params.get('q')
 
                 if search:
@@ -488,6 +500,25 @@ class BookViewSet(viewsets.ModelViewSet):
                         ).distinct()
 
                 serializer = BookAvailableOptionSerializer(qs, many=True, context={'request': request})
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
+        @action(detail=True, methods=['post'], permission_classes=[IsLibrarianOrAdminUser], url_path='restore')
+        def restore(self, request, pk=None):
+                """
+                Restaura un libro que fue dado de baja (soft deleted).
+                Permite al bibliotecario o administrador recuperarlo en el catálogo.
+                """
+                try:
+                        book = Book.objects.get(pk=pk, deleted_at__isnull=False)
+                except Book.DoesNotExist:
+                        return Response(
+                                {"detail": "No se encontró un libro eliminado con este ID."},
+                                status=status.HTTP_404_NOT_FOUND
+                        )
+
+                book.deleted_at = None
+                book.save(update_fields=["deleted_at"])
+                serializer = BookDetailSerializer(book, context={'request': request})
                 return Response(serializer.data, status=status.HTTP_200_OK)
 
 

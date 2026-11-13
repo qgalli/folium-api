@@ -544,6 +544,65 @@ class CatalogPublicReadOnlyTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
+    def test_soft_delete_book_excludes_it_from_catalog_and_options(self):
+        self.client.force_authenticate(user=self.librarian)
+        delete_url = reverse("folium_api:book-detail", args=[self.book.id])
+        res_del = self.client.delete(delete_url)
+        self.assertEqual(res_del.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.book.refresh_from_db()
+        self.assertIsNotNone(self.book.deleted_at)
+
+        # No aparece en el catálogo
+        res_list = self.client.get(reverse("folium_api:book-list"))
+        self.assertEqual(res_list.status_code, status.HTTP_200_OK)
+        book_ids = [b["id"] for b in res_list.data["results"]]
+        self.assertNotIn(self.book.id, book_ids)
+
+        # Retorna 404 al consultar detalle
+        res_detail = self.client.get(delete_url)
+        self.assertEqual(res_detail.status_code, status.HTTP_404_NOT_FOUND)
+
+        # No aparece en options
+        res_options = self.client.get(reverse("folium_api:book-options"))
+        self.assertEqual(res_options.status_code, status.HTTP_200_OK)
+        option_ids = [b["id"] for b in res_options.data]
+        self.assertNotIn(self.book.id, option_ids)
+
+    def test_recreating_soft_deleted_book_reactivates_it(self):
+        self.client.force_authenticate(user=self.librarian)
+        self.book.deleted_at = timezone.now()
+        self.book.save(update_fields=["deleted_at"])
+
+        # Intentar volver a dar de alta con el mismo ISBN
+        response = self.client.post(
+            reverse("folium_api:book-list"),
+            {
+                "title": "Libro Reactivado",
+                "editorial": self.editorial.id,
+                "isbn": self.book.isbn,
+                "authors": [self.author.id],
+                "genres": [self.genre.id],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.book.refresh_from_db()
+        self.assertIsNone(self.book.deleted_at)
+        self.assertEqual(self.book.title, "Libro Reactivado")
+
+    def test_restore_action_reactivates_soft_deleted_book(self):
+        self.client.force_authenticate(user=self.librarian)
+        self.book.deleted_at = timezone.now()
+        self.book.save(update_fields=["deleted_at"])
+
+        restore_url = f"/api/v1/book/{self.book.id}/restore/"
+        response = self.client.post(restore_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.book.refresh_from_db()
+        self.assertIsNone(self.book.deleted_at)
+
     def test_items_and_loans_stay_private(self):
         response_items = self.client.get(reverse("folium_api:item-list"))
         self.assertIn(response_items.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
