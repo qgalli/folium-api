@@ -319,6 +319,13 @@ class BookPagination(pagination.PageNumberPagination):
         page_size_query_param = 'page_size' 
         max_page_size = 50                  
 
+
+class AvailableBooksPagination(pagination.PageNumberPagination):
+        page_size = 50
+        page_size_query_param = 'page_size'
+        max_page_size = 100
+
+
 class BookViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar los libros (catálogo).
@@ -469,7 +476,13 @@ class BookViewSet(viewsets.ModelViewSet):
                 serializer = BookOptionSerializer(qs, many=True)
                 return Response(serializer.data)
 
-        @action(detail=False, methods=['get'], permission_classes=[IsLibrarianOrReadOnly], url_path='available')
+        @action(
+                detail=False,
+                methods=['get'],
+                permission_classes=[IsLibrarianOrReadOnly],
+                pagination_class=AvailableBooksPagination,
+                url_path='available',
+        )
         def available_books(self, request, *args, **kwargs):
                 """
                 Devuelve la lista de libros que tienen al menos un ejemplar disponible (Item AVAILABLE),
@@ -499,8 +512,14 @@ class BookViewSet(viewsets.ModelViewSet):
                                 Q(items__inventory_code__icontains=search)
                         ).distinct()
 
-                serializer = BookAvailableOptionSerializer(qs, many=True, context={'request': request})
-                return Response(serializer.data, status=status.HTTP_200_OK)
+                qs = qs.order_by('title', 'id')
+                page = self.paginate_queryset(qs)
+                serializer = BookAvailableOptionSerializer(
+                                page,
+                                many=True,
+                                context={'request': request},
+                )
+                return self.get_paginated_response(serializer.data)
 
         @action(detail=True, methods=['post'], permission_classes=[IsLibrarianOrAdminUser], url_path='restore')
         def restore(self, request, pk=None):
