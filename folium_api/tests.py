@@ -674,11 +674,43 @@ class LoanCounterTests(APITestCase):
         self.client.force_authenticate(user=self.librarian)
         response = self.client.get("/api/v1/book/available/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertGreaterEqual(len(response.data), 1)
-        book_data = next((b for b in response.data if b["id"] == self.book.id), None)
+        self.assertEqual(response.data["count"], 1)
+        self.assertIsNone(response.data["next"])
+        self.assertIsNone(response.data["previous"])
+        book_data = next(
+            (b for b in response.data["results"] if b["id"] == self.book.id),
+            None,
+        )
         self.assertIsNotNone(book_data)
         self.assertEqual(book_data["available_count"], 1)
         self.assertEqual(book_data["available_items"][0]["inventory_code"], "FIC-001")
+
+    def test_available_books_endpoint_paginates_50_books_by_default(self):
+        self.client.force_authenticate(user=self.librarian)
+        for index in range(50):
+            book = Book.objects.create(
+                title=f"Available title {index:02d}",
+                editorial=self.editorial,
+                isbn=f"978000000{index:04d}",
+            )
+            Item.objects.create(
+                book=book,
+                inventory_code=f"PAGE-{index:03d}",
+                status=Item.Status.AVAILABLE,
+            )
+
+        first_page = self.client.get("/api/v1/book/available/")
+        self.assertEqual(first_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_page.data["count"], 51)
+        self.assertEqual(len(first_page.data["results"]), 50)
+        self.assertIsNone(first_page.data["previous"])
+        self.assertIsNotNone(first_page.data["next"])
+
+        second_page = self.client.get("/api/v1/book/available/?page=2")
+        self.assertEqual(second_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(second_page.data["results"]), 1)
+        self.assertIsNotNone(second_page.data["previous"])
+        self.assertIsNone(second_page.data["next"])
 
     def test_librarian_can_create_loan_for_item(self):
         self.client.force_authenticate(user=self.librarian)
