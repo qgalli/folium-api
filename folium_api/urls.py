@@ -49,6 +49,7 @@ urlpatterns = [
 
     # Perfil del usuario autenticado (Lector / Bibliotecario / Admin)
     path('me/', views.UserProfileView.as_view(), name='user-profile'),
+    path('me/change-password/', views.ChangePasswordView.as_view(), name='change-password'),
 
     # Endpoints públicos de libros (no requieren login)
     path('random/', views.RandomBookView.as_view(), name='random-book'),

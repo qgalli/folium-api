@@ -24,6 +24,7 @@ from django.db.models import (
 from django.db.models.functions import Concat, Lower
 from django.utils import timezone
 from .models import *
+from .passwords import generate_temporary_password
 from .serializers import *
 from rest_framework.exceptions import ValidationError
 from .permissions import (
@@ -679,6 +680,23 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
                 return self.request.user
 
 
+class ChangePasswordView(generics.GenericAPIView):
+        serializer_class = ChangePasswordSerializer
+        permission_classes = [permissions.IsAuthenticated]
+
+        def post(self, request, *args, **kwargs):
+                serializer = self.get_serializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+
+                request.user.set_password(serializer.validated_data['new_password'])
+                request.user.save(update_fields=['password'])
+
+                return Response(
+                        {"detail": "La contraseña se actualizó correctamente."},
+                        status=status.HTTP_200_OK,
+                )
+
+
 class UserViewSet(viewsets.ModelViewSet):
         """
         Controlador para que los bibliotecarios y administradores gestionen
@@ -733,8 +751,13 @@ class UserViewSet(viewsets.ModelViewSet):
 
         def create(self, request, *args, **kwargs):
                 data = request.data.copy()
+                temporary_password = None
                 if 'rol' not in data or not data['rol']:
                         data['rol'] = User.Rol.USER
+
+                if not data.get('password'):
+                        temporary_password = generate_temporary_password()
+                        data['password'] = temporary_password
 
                 # Si no se provee username, generarlo automáticamente a partir del DNI o nombre
                 if not data.get('username') or not str(data.get('username')).strip():
@@ -757,6 +780,8 @@ class UserViewSet(viewsets.ModelViewSet):
                 resp_data['active_loans_count'] = 0
                 user_obj = serializer.instance
                 resp_data['full_name'] = user_obj.get_full_name() or user_obj.username
+                if temporary_password:
+                        resp_data['temporary_password'] = temporary_password
 
                 return Response(resp_data, status=status.HTTP_201_CREATED, headers=headers)
 

@@ -1,5 +1,7 @@
 import re
 from datetime import datetime
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth import get_user_model
@@ -23,6 +25,30 @@ from .models import * # Importamos todos los modelos del archivo `models.py` (qu
 
 
 User = get_user_model()
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    confirm_new_password = serializers.CharField(write_only=True, trim_whitespace=False)
+
+    def validate_current_password(self, value):
+        if not self.context["request"].user.check_password(value):
+            raise serializers.ValidationError("La contraseña actual es incorrecta.")
+        return value
+
+    def validate(self, attrs):
+        if attrs["new_password"] != attrs["confirm_new_password"]:
+            raise serializers.ValidationError({
+                "confirm_new_password": "Las contraseñas nuevas no coinciden."
+            })
+
+        try:
+            validate_password(attrs["new_password"], user=self.context["request"].user)
+        except DjangoValidationError as error:
+            raise serializers.ValidationError({"new_password": error.messages}) from error
+
+        return attrs
 
 
 class FoliumTokenObtainPairSerializer(TokenObtainPairSerializer):
