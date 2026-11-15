@@ -712,6 +712,33 @@ class LoanCounterTests(APITestCase):
         self.assertIsNotNone(second_page.data["previous"])
         self.assertIsNone(second_page.data["next"])
 
+    def test_available_books_search_does_not_duplicate_multiple_matching_authors(self):
+        self.client.force_authenticate(user=self.librarian)
+        book = Book.objects.create(
+            title="Cuentos tradicionales",
+            editorial=self.editorial,
+            isbn="9780000000001",
+        )
+        book.authors.add(
+            Author.objects.create(name="Jacob", last_name="Grimm"),
+            Author.objects.create(name="Wilhelm", last_name="Grimm"),
+        )
+        Item.objects.create(
+            book=book,
+            inventory_code="INV-001",
+            status=Item.Status.AVAILABLE,
+        )
+
+        response = self.client.get(
+            "/api/v1/book/available/",
+            {"search": "Grimm"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["id"], book.id)
+
     def test_librarian_can_create_loan_for_item(self):
         self.client.force_authenticate(user=self.librarian)
         payload = {
