@@ -8,7 +8,19 @@ from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
 import random
 from django.db import transaction
-from django.db.models import Avg, Case, Count, DateTimeField, F, IntegerField, Q, Value, When
+from django.db.models import (
+        Avg,
+        Case,
+        Count,
+        DateTimeField,
+        Exists,
+        F,
+        IntegerField,
+        OuterRef,
+        Q,
+        Value,
+        When,
+)
 from django.db.models.functions import Concat, Lower
 from django.utils import timezone
 from .models import *
@@ -497,20 +509,32 @@ class BookViewSet(viewsets.ModelViewSet):
                 search = request.query_params.get('search') or request.query_params.get('q')
                 if search:
                         search = search.strip()
-                        qs = qs.annotate(
+                        matching_authors = Author.objects.filter(
+                                books=OuterRef('pk')
+                        ).annotate(
                                 author_full_name=Concat(
-                                        F('authors__name'),
+                                        F('name'),
                                         Value(' '),
-                                        F('authors__last_name')
+                                        F('last_name'),
                                 )
+                        ).filter(
+                                Q(name__icontains=search) |
+                                Q(last_name__icontains=search) |
+                                Q(author_full_name__icontains=search)
+                        )
+                        matching_items = Item.objects.filter(
+                                book_id=OuterRef('pk'),
+                                inventory_code__icontains=search,
+                        )
+                        qs = qs.annotate(
+                                matches_author=Exists(matching_authors),
+                                matches_item=Exists(matching_items),
                         ).filter(
                                 Q(title__icontains=search) |
                                 Q(isbn__icontains=search) |
-                                Q(authors__name__icontains=search) |
-                                Q(authors__last_name__icontains=search) |
-                                Q(author_full_name__icontains=search) |
-                                Q(items__inventory_code__icontains=search)
-                        ).distinct()
+                                Q(matches_author=True) |
+                                Q(matches_item=True)
+                        )
 
                 qs = qs.order_by('title', 'id')
                 page = self.paginate_queryset(qs)
