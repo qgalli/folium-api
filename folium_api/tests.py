@@ -1,14 +1,31 @@
 from datetime import datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
+from django.test import SimpleTestCase
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
 from .models import Author, Book, Editorial, Review, Item, Loan, Reservation, Genre
+from .passwords import TEMPORARY_PASSWORD_WORDS
 
 User = get_user_model()
+
+
+class TemporaryPasswordGenerationTests(SimpleTestCase):
+    def test_password_word_list_is_unique_and_uses_short_ascii_words(self):
+        self.assertGreaterEqual(len(TEMPORARY_PASSWORD_WORDS), 300)
+        self.assertEqual(
+            len(TEMPORARY_PASSWORD_WORDS),
+            len(set(TEMPORARY_PASSWORD_WORDS)),
+        )
+        self.assertTrue(
+            all(
+                word.isascii() and word.isalpha() and len(word) <= 6
+                for word in TEMPORARY_PASSWORD_WORDS
+            )
+        )
 
 
 class TokenRoleClaimTests(APITestCase):
@@ -668,7 +685,32 @@ class LoanCounterTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["dni"], 55667788)
         self.assertEqual(response.data["rol"], User.Rol.USER)
+        temporary_password = response.data["temporary_password"]
+        password_parts = temporary_password.split("-")
+        self.assertEqual(len(password_parts), 6)
+        self.assertTrue(all(word in TEMPORARY_PASSWORD_WORDS for word in password_parts[:5]))
+        self.assertTrue(password_parts[-1].isdigit())
+        self.assertEqual(len(password_parts[-1]), 4)
         self.assertTrue(User.objects.filter(dni=55667788).exists())
+        reader = User.objects.get(dni=55667788)
+        self.assertTrue(reader.check_password(temporary_password))
+        self.assertNotIn("password", response.data)
+
+        self.client.force_authenticate(user=None)
+        login_response = self.client.post(
+            "/api/v1/token/",
+            {
+                "username": response.data["username"],
+                "password": temporary_password,
+            },
+            format="json",
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(user=reader)
+        profile_response = self.client.get("/api/v1/me/")
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("temporary_password", profile_response.data)
 
     def test_librarian_can_get_available_books_for_loan(self):
         self.client.force_authenticate(user=self.librarian)
@@ -754,6 +796,137 @@ class LoanCounterTests(APITestCase):
         self.client.force_authenticate(user=self.reader)
         response = self.client.get(f"/api/v1/user/by-dni/{self.reader.dni}/")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ChangePasswordTests(APITestCase):
+    def setUp(self):
+        self.reader = User.objects.create_user(
+            username="password_reader",
+            dni=88776655,
+            email="password_reader@example.com",
+            password="Original-Reader-Password-289!",
+            rol=User.Rol.USER,
+        )
+        self.librarian = User.objects.create_user(
+            username="password_librarian",
+            dni=88776656,
+            email="password_librarian@example.com",
+            password="Original-Librarian-Password-289!",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.new_password = "Fresh-Account-Password-782!"
+
+    def test_reader_can_change_own_password(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.reader.refresh_from_db()
+        self.assertTrue(self.reader.check_password(self.new_password))
+
+    def test_librarian_can_change_own_password(self):
+        self.client.force_authenticate(user=self.librarian)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Librarian-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.librarian.refresh_from_db()
+        self.assertTrue(self.librarian.check_password(self.new_password))
+
+    def test_change_password_rejects_wrong_current_password(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Incorrect-Current-Password",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.reader.refresh_from_db()
+        self.assertTrue(self.reader.check_password("Original-Reader-Password-289!"))
+
+    def test_change_password_rejects_mismatched_confirmation(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": "Different-Account-Password-289!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_change_password_rejects_password_that_fails_django_validators(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": "short",
+                "confirm_new_password": "short",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.reader.refresh_from_db()
+        self.assertTrue(self.reader.check_password("Original-Reader-Password-289!"))
+
+    def test_change_password_requires_authentication(self):
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_password_change_only_updates_authenticated_user(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+                "user_id": self.librarian.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.reader.refresh_from_db()
+        self.librarian.refresh_from_db()
+        self.assertTrue(self.reader.check_password(self.new_password))
+        self.assertTrue(
+            self.librarian.check_password("Original-Librarian-Password-289!")
+        )
 
 
 
