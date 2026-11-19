@@ -1,4 +1,5 @@
 from datetime import datetime, time, timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase
@@ -7,7 +8,20 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
-from .models import Author, Book, Editorial, Review, Item, Loan, Reservation, Genre
+from .models import (
+    Author,
+    Book,
+    Editorial,
+    Review,
+    Item,
+    Loan,
+    Reservation,
+    Genre,
+    LibrarySubscription,
+    PaymentTransaction,
+    SubscriptionPlan,
+    WebhookEventLog,
+)
 from .passwords import TEMPORARY_PASSWORD_WORDS
 
 User = get_user_model()
@@ -1600,3 +1614,90 @@ class BillingMercadoPagoTests(APITestCase):
         self.assertIn("checkout", response.data)
         self.assertIn("preference_id", response.data["checkout"])
         self.assertIn("init_point", response.data["checkout"])
+
+    def test_checkout_creates_pending_subscription(self):
+        url = reverse("folium_api:billing-checkout")
+        response = self.client.post(
+            url,
+            {
+                "plan_code": "PRO",
+                "billing_cycle": "ANNUAL",
+                "organization_name": "Biblioteca del Sur",
+                "tax_id": "20123456789",
+                "payer_email": "sur@biblioteca.org",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        external_reference = response.data["checkout"]["external_reference"]
+        subscription = LibrarySubscription.objects.get(
+            external_reference=external_reference
+        )
+        self.assertEqual(subscription.status, LibrarySubscription.Status.PENDING)
+        self.assertEqual(subscription.plan.code, "PRO")
+        self.assertEqual(subscription.billing_cycle, "ANNUAL")
+        self.assertEqual(
+            subscription.mp_preference_id,
+            response.data["checkout"]["preference_id"],
+        )
+
+    @patch(
+        "folium_api.mercadopago_service.MercadoPagoService.fetch_payment_details",
+        return_value={
+            "id": "PAYMENT-123",
+            "external_reference": "FOLIUM-PRO-MONTHLY-U0-TEST",
+            "status": "approved",
+            "status_detail": "accredited",
+            "transaction_amount": 455000,
+            "currency_id": "ARS",
+            "payment_method_id": "visa",
+            "payment_type_id": "credit_card",
+            "payer": {"email": "pagador@biblioteca.org"},
+        },
+    )
+    def test_webhook_persists_payment_and_activates_subscription(self, _fetch):
+        plan = SubscriptionPlan.objects.create(
+            code="PRO",
+            name="Folium Integral",
+            monthly_price="455000.00",
+            annual_monthly_equivalent="379100.00",
+        )
+        subscription = LibrarySubscription.objects.create(
+            plan=plan,
+            organization_name="Biblioteca del Sur",
+            payer_email="pagador@biblioteca.org",
+            external_reference="FOLIUM-PRO-MONTHLY-U0-TEST",
+        )
+        url = reverse("folium_api:billing-mp-webhook")
+
+        response = self.client.post(
+            url,
+            {"type": "payment", "data": {"id": "PAYMENT-123"}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        subscription.refresh_from_db()
+        self.assertEqual(subscription.status, LibrarySubscription.Status.ACTIVE)
+        self.assertIsNotNone(subscription.current_period_start)
+        self.assertIsNotNone(subscription.current_period_end)
+        self.assertEqual(
+            PaymentTransaction.objects.filter(mp_payment_id="PAYMENT-123").count(),
+            1,
+        )
+        payment = PaymentTransaction.objects.get(mp_payment_id="PAYMENT-123")
+        self.assertEqual(payment.subscription, subscription)
+        self.assertEqual(payment.status, "approved")
+        self.assertTrue(WebhookEventLog.objects.filter(processed=True).exists())
+
+        response = self.client.post(
+            url,
+            {"type": "payment", "data": {"id": "PAYMENT-123"}},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            PaymentTransaction.objects.filter(mp_payment_id="PAYMENT-123").count(),
+            1,
+        )

@@ -80,7 +80,7 @@ class Migration(migrations.Migration):
                 ('cancel_at_period_end', models.BooleanField(default=False)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('updated_at', models.DateTimeField(auto_now=True)),
-                ('user', models.ForeignKey(help_text='Usuario administrador o bibliotecario titular de la suscripción.', on_delete=django.db.models.deletion.PROTECT, related_name='library_subscriptions', to=settings.AUTH_USER_MODEL)),
+                ('user', models.ForeignKey(blank=True, help_text='Usuario administrador o bibliotecario titular de la suscripción.', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='library_subscriptions', to=settings.AUTH_USER_MODEL)),
                 ('plan', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='subscriptions', to='folium_api.subscriptionplan')),
             ],
             options={

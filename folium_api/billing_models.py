@@ -115,8 +115,10 @@ class LibrarySubscription(models.Model):
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
         related_name="library_subscriptions",
+        null=True,
+        blank=True,
         help_text="Usuario administrador o bibliotecario titular de la suscripción.",
     )
     plan = models.ForeignKey(
