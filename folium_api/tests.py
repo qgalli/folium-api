@@ -1,14 +1,45 @@
 from datetime import datetime, time, timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.test import SimpleTestCase
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import AccessToken
-from .models import Author, Book, Editorial, Review, Item, Loan, Reservation, Genre
+from .models import (
+    Author,
+    Book,
+    Editorial,
+    Review,
+    Item,
+    Loan,
+    Reservation,
+    Genre,
+    LibrarySubscription,
+    PaymentTransaction,
+    SubscriptionPlan,
+    WebhookEventLog,
+)
+from .passwords import TEMPORARY_PASSWORD_WORDS
 
 User = get_user_model()
+
+
+class TemporaryPasswordGenerationTests(SimpleTestCase):
+    def test_password_word_list_is_unique_and_uses_short_ascii_words(self):
+        self.assertGreaterEqual(len(TEMPORARY_PASSWORD_WORDS), 300)
+        self.assertEqual(
+            len(TEMPORARY_PASSWORD_WORDS),
+            len(set(TEMPORARY_PASSWORD_WORDS)),
+        )
+        self.assertTrue(
+            all(
+                word.isascii() and word.isalpha() and len(word) <= 6
+                for word in TEMPORARY_PASSWORD_WORDS
+            )
+        )
 
 
 class TokenRoleClaimTests(APITestCase):
@@ -544,6 +575,65 @@ class CatalogPublicReadOnlyTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
+    def test_soft_delete_book_excludes_it_from_catalog_and_options(self):
+        self.client.force_authenticate(user=self.librarian)
+        delete_url = reverse("folium_api:book-detail", args=[self.book.id])
+        res_del = self.client.delete(delete_url)
+        self.assertEqual(res_del.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.book.refresh_from_db()
+        self.assertIsNotNone(self.book.deleted_at)
+
+        # No aparece en el catálogo
+        res_list = self.client.get(reverse("folium_api:book-list"))
+        self.assertEqual(res_list.status_code, status.HTTP_200_OK)
+        book_ids = [b["id"] for b in res_list.data["results"]]
+        self.assertNotIn(self.book.id, book_ids)
+
+        # Retorna 404 al consultar detalle
+        res_detail = self.client.get(delete_url)
+        self.assertEqual(res_detail.status_code, status.HTTP_404_NOT_FOUND)
+
+        # No aparece en options
+        res_options = self.client.get(reverse("folium_api:book-options"))
+        self.assertEqual(res_options.status_code, status.HTTP_200_OK)
+        option_ids = [b["id"] for b in res_options.data]
+        self.assertNotIn(self.book.id, option_ids)
+
+    def test_recreating_soft_deleted_book_reactivates_it(self):
+        self.client.force_authenticate(user=self.librarian)
+        self.book.deleted_at = timezone.now()
+        self.book.save(update_fields=["deleted_at"])
+
+        # Intentar volver a dar de alta con el mismo ISBN
+        response = self.client.post(
+            reverse("folium_api:book-list"),
+            {
+                "title": "Libro Reactivado",
+                "editorial": self.editorial.id,
+                "isbn": self.book.isbn,
+                "authors": [self.author.id],
+                "genres": [self.genre.id],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.book.refresh_from_db()
+        self.assertIsNone(self.book.deleted_at)
+        self.assertEqual(self.book.title, "Libro Reactivado")
+
+    def test_restore_action_reactivates_soft_deleted_book(self):
+        self.client.force_authenticate(user=self.librarian)
+        self.book.deleted_at = timezone.now()
+        self.book.save(update_fields=["deleted_at"])
+
+        restore_url = f"/api/v1/book/{self.book.id}/restore/"
+        response = self.client.post(restore_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.book.refresh_from_db()
+        self.assertIsNone(self.book.deleted_at)
+
     def test_items_and_loans_stay_private(self):
         response_items = self.client.get(reverse("folium_api:item-list"))
         self.assertIn(response_items.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
@@ -609,17 +699,101 @@ class LoanCounterTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["dni"], 55667788)
         self.assertEqual(response.data["rol"], User.Rol.USER)
+        temporary_password = response.data["temporary_password"]
+        password_parts = temporary_password.split("-")
+        self.assertEqual(len(password_parts), 6)
+        self.assertTrue(all(word in TEMPORARY_PASSWORD_WORDS for word in password_parts[:5]))
+        self.assertTrue(password_parts[-1].isdigit())
+        self.assertEqual(len(password_parts[-1]), 4)
         self.assertTrue(User.objects.filter(dni=55667788).exists())
+        reader = User.objects.get(dni=55667788)
+        self.assertTrue(reader.check_password(temporary_password))
+        self.assertNotIn("password", response.data)
+
+        self.client.force_authenticate(user=None)
+        login_response = self.client.post(
+            "/api/v1/token/",
+            {
+                "username": response.data["username"],
+                "password": temporary_password,
+            },
+            format="json",
+        )
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(user=reader)
+        profile_response = self.client.get("/api/v1/me/")
+        self.assertEqual(profile_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("temporary_password", profile_response.data)
 
     def test_librarian_can_get_available_books_for_loan(self):
         self.client.force_authenticate(user=self.librarian)
         response = self.client.get("/api/v1/book/available/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertGreaterEqual(len(response.data), 1)
-        book_data = next((b for b in response.data if b["id"] == self.book.id), None)
+        self.assertEqual(response.data["count"], 1)
+        self.assertIsNone(response.data["next"])
+        self.assertIsNone(response.data["previous"])
+        book_data = next(
+            (b for b in response.data["results"] if b["id"] == self.book.id),
+            None,
+        )
         self.assertIsNotNone(book_data)
         self.assertEqual(book_data["available_count"], 1)
         self.assertEqual(book_data["available_items"][0]["inventory_code"], "FIC-001")
+
+    def test_available_books_endpoint_paginates_50_books_by_default(self):
+        self.client.force_authenticate(user=self.librarian)
+        for index in range(50):
+            book = Book.objects.create(
+                title=f"Available title {index:02d}",
+                editorial=self.editorial,
+                isbn=f"978000000{index:04d}",
+            )
+            Item.objects.create(
+                book=book,
+                inventory_code=f"PAGE-{index:03d}",
+                status=Item.Status.AVAILABLE,
+            )
+
+        first_page = self.client.get("/api/v1/book/available/")
+        self.assertEqual(first_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_page.data["count"], 51)
+        self.assertEqual(len(first_page.data["results"]), 50)
+        self.assertIsNone(first_page.data["previous"])
+        self.assertIsNotNone(first_page.data["next"])
+
+        second_page = self.client.get("/api/v1/book/available/?page=2")
+        self.assertEqual(second_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(second_page.data["results"]), 1)
+        self.assertIsNotNone(second_page.data["previous"])
+        self.assertIsNone(second_page.data["next"])
+
+    def test_available_books_search_does_not_duplicate_multiple_matching_authors(self):
+        self.client.force_authenticate(user=self.librarian)
+        book = Book.objects.create(
+            title="Cuentos tradicionales",
+            editorial=self.editorial,
+            isbn="9780000000001",
+        )
+        book.authors.add(
+            Author.objects.create(name="Jacob", last_name="Grimm"),
+            Author.objects.create(name="Wilhelm", last_name="Grimm"),
+        )
+        Item.objects.create(
+            book=book,
+            inventory_code="INV-001",
+            status=Item.Status.AVAILABLE,
+        )
+
+        response = self.client.get(
+            "/api/v1/book/available/",
+            {"search": "Grimm"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["id"], book.id)
 
     def test_librarian_can_create_loan_for_item(self):
         self.client.force_authenticate(user=self.librarian)
@@ -636,6 +810,137 @@ class LoanCounterTests(APITestCase):
         self.client.force_authenticate(user=self.reader)
         response = self.client.get(f"/api/v1/user/by-dni/{self.reader.dni}/")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class ChangePasswordTests(APITestCase):
+    def setUp(self):
+        self.reader = User.objects.create_user(
+            username="password_reader",
+            dni=88776655,
+            email="password_reader@example.com",
+            password="Original-Reader-Password-289!",
+            rol=User.Rol.USER,
+        )
+        self.librarian = User.objects.create_user(
+            username="password_librarian",
+            dni=88776656,
+            email="password_librarian@example.com",
+            password="Original-Librarian-Password-289!",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.new_password = "Fresh-Account-Password-782!"
+
+    def test_reader_can_change_own_password(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.reader.refresh_from_db()
+        self.assertTrue(self.reader.check_password(self.new_password))
+
+    def test_librarian_can_change_own_password(self):
+        self.client.force_authenticate(user=self.librarian)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Librarian-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.librarian.refresh_from_db()
+        self.assertTrue(self.librarian.check_password(self.new_password))
+
+    def test_change_password_rejects_wrong_current_password(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Incorrect-Current-Password",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.reader.refresh_from_db()
+        self.assertTrue(self.reader.check_password("Original-Reader-Password-289!"))
+
+    def test_change_password_rejects_mismatched_confirmation(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": "Different-Account-Password-289!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_change_password_rejects_password_that_fails_django_validators(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": "short",
+                "confirm_new_password": "short",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.reader.refresh_from_db()
+        self.assertTrue(self.reader.check_password("Original-Reader-Password-289!"))
+
+    def test_change_password_requires_authentication(self):
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_password_change_only_updates_authenticated_user(self):
+        self.client.force_authenticate(user=self.reader)
+        response = self.client.post(
+            "/api/v1/me/change-password/",
+            {
+                "current_password": "Original-Reader-Password-289!",
+                "new_password": self.new_password,
+                "confirm_new_password": self.new_password,
+                "user_id": self.librarian.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.reader.refresh_from_db()
+        self.librarian.refresh_from_db()
+        self.assertTrue(self.reader.check_password(self.new_password))
+        self.assertTrue(
+            self.librarian.check_password("Original-Librarian-Password-289!")
+        )
 
 
 
@@ -1309,3 +1614,90 @@ class BillingMercadoPagoTests(APITestCase):
         self.assertIn("checkout", response.data)
         self.assertIn("preference_id", response.data["checkout"])
         self.assertIn("init_point", response.data["checkout"])
+
+    def test_checkout_creates_pending_subscription(self):
+        url = reverse("folium_api:billing-checkout")
+        response = self.client.post(
+            url,
+            {
+                "plan_code": "PRO",
+                "billing_cycle": "ANNUAL",
+                "organization_name": "Biblioteca del Sur",
+                "tax_id": "20123456789",
+                "payer_email": "sur@biblioteca.org",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        external_reference = response.data["checkout"]["external_reference"]
+        subscription = LibrarySubscription.objects.get(
+            external_reference=external_reference
+        )
+        self.assertEqual(subscription.status, LibrarySubscription.Status.PENDING)
+        self.assertEqual(subscription.plan.code, "PRO")
+        self.assertEqual(subscription.billing_cycle, "ANNUAL")
+        self.assertEqual(
+            subscription.mp_preference_id,
+            response.data["checkout"]["preference_id"],
+        )
+
+    @patch(
+        "folium_api.mercadopago_service.MercadoPagoService.fetch_payment_details",
+        return_value={
+            "id": "PAYMENT-123",
+            "external_reference": "FOLIUM-PRO-MONTHLY-U0-TEST",
+            "status": "approved",
+            "status_detail": "accredited",
+            "transaction_amount": 455000,
+            "currency_id": "ARS",
+            "payment_method_id": "visa",
+            "payment_type_id": "credit_card",
+            "payer": {"email": "pagador@biblioteca.org"},
+        },
+    )
+    def test_webhook_persists_payment_and_activates_subscription(self, _fetch):
+        plan = SubscriptionPlan.objects.create(
+            code="PRO",
+            name="Folium Integral",
+            monthly_price="455000.00",
+            annual_monthly_equivalent="379100.00",
+        )
+        subscription = LibrarySubscription.objects.create(
+            plan=plan,
+            organization_name="Biblioteca del Sur",
+            payer_email="pagador@biblioteca.org",
+            external_reference="FOLIUM-PRO-MONTHLY-U0-TEST",
+        )
+        url = reverse("folium_api:billing-mp-webhook")
+
+        response = self.client.post(
+            url,
+            {"type": "payment", "data": {"id": "PAYMENT-123"}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        subscription.refresh_from_db()
+        self.assertEqual(subscription.status, LibrarySubscription.Status.ACTIVE)
+        self.assertIsNotNone(subscription.current_period_start)
+        self.assertIsNotNone(subscription.current_period_end)
+        self.assertEqual(
+            PaymentTransaction.objects.filter(mp_payment_id="PAYMENT-123").count(),
+            1,
+        )
+        payment = PaymentTransaction.objects.get(mp_payment_id="PAYMENT-123")
+        self.assertEqual(payment.subscription, subscription)
+        self.assertEqual(payment.status, "approved")
+        self.assertTrue(WebhookEventLog.objects.filter(processed=True).exists())
+
+        response = self.client.post(
+            url,
+            {"type": "payment", "data": {"id": "PAYMENT-123"}},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            PaymentTransaction.objects.filter(mp_payment_id="PAYMENT-123").count(),
+            1,
+        )

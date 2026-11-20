@@ -1,9 +1,18 @@
 import logging
+from decimal import Decimal
+
+from django.db import transaction
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .billing_serializers import CreateCheckoutPreferenceSerializer
+from .billing_models import (
+    LibrarySubscription,
+    PaymentTransaction,
+    SubscriptionPlan,
+    WebhookEventLog,
+)
 from .mercadopago_service import (
     LIBRARY_PLANS_CATALOG,
     MercadoPagoService,
@@ -12,6 +21,30 @@ from .mercadopago_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_or_sync_subscription_plan(plan_code):
+    catalog_plan = LIBRARY_PLANS_CATALOG[plan_code]
+    limits = catalog_plan["limits"]
+    plan, _ = SubscriptionPlan.objects.update_or_create(
+        code=plan_code,
+        defaults={
+            "name": catalog_plan["name"],
+            "badge_text": catalog_plan["badge_text"],
+            "description": catalog_plan["includes_heading"],
+            "monthly_price": catalog_plan["monthly_price"],
+            "annual_monthly_equivalent": catalog_plan["annual_monthly_equivalent"],
+            "currency_id": catalog_plan["currency_id"],
+            "max_books": limits["max_books"],
+            "max_items": limits["max_items"],
+            "max_librarians": limits["max_librarians"],
+            "has_mass_importer": limits["has_mass_importer"],
+            "has_ai_curator": limits["has_ai_curator"],
+            "has_priority_support": limits["has_priority_support"],
+            "is_active": True,
+        },
+    )
+    return plan
 
 
 class BillingPlansListView(APIView):
@@ -116,6 +149,30 @@ class CreateCheckoutPreferenceView(APIView):
                     tax_id=tax_id,
                 )
 
+            plan = get_or_sync_subscription_plan(plan_code)
+            LibrarySubscription.objects.update_or_create(
+                external_reference=checkout_data["external_reference"],
+                defaults={
+                    "user": user,
+                    "plan": plan,
+                    "organization_name": organization_name,
+                    "tax_id": tax_id,
+                    "payer_email": payer_email,
+                    "billing_cycle": billing_cycle,
+                    "status": LibrarySubscription.Status.PENDING,
+                    "mp_preference_id": (
+                        checkout_data.get("preference_id")
+                        if checkout_mode == "PREFERENCE"
+                        else None
+                    ),
+                    "mp_preapproval_id": (
+                        checkout_data.get("preapproval_id")
+                        if checkout_mode == "SUBSCRIPTION"
+                        else None
+                    ),
+                },
+            )
+
             return Response(
                 {
                     "success": True,
@@ -216,6 +273,18 @@ class MercadoPagoWebhookView(APIView):
         )
 
         mp_service = MercadoPagoService()
+        webhook_log = WebhookEventLog.objects.create(
+            request_id=x_request_id,
+            event_type=event_type,
+            data_id=str(data_id),
+            signature_valid=not bool(mp_service.webhook_secret),
+            raw_headers={
+                "x-request-id": x_request_id,
+                "x-signature": x_signature,
+                "content-type": request.headers.get("content-type", ""),
+            },
+            raw_payload=payload,
+        )
 
         # 1. Validar firma criptográfica si MP_WEBHOOK_SECRET está configurado
         if mp_service.webhook_secret:
@@ -225,7 +294,11 @@ class MercadoPagoWebhookView(APIView):
                     x_request_id=x_request_id,
                     data_id=str(data_id),
                 )
+                webhook_log.signature_valid = True
+                webhook_log.save(update_fields=["signature_valid"])
             except MercadoPagoWebhookSecurityError as sec_err:
+                webhook_log.error_message = str(sec_err)
+                webhook_log.save(update_fields=["error_message"])
                 logger.warning(
                     "Webhook MercadoPago rechazado por firma inválida (request_id=%s, data_id=%s): %s",
                     x_request_id,
@@ -242,7 +315,44 @@ class MercadoPagoWebhookView(APIView):
             try:
                 payment_details = mp_service.fetch_payment_details(str(data_id))
                 payment_status = payment_details.get("status")
-                ext_ref = payment_details.get("external_reference", "")
+                ext_ref = (
+                    payment_details.get("external_reference")
+                    or data_obj.get("external_reference")
+                    or payload.get("external_reference")
+                    or request.query_params.get("external_reference")
+                    or ""
+                )
+
+                subscription = (
+                    LibrarySubscription.objects.filter(external_reference=ext_ref).first()
+                    if ext_ref
+                    else None
+                )
+                amount = Decimal(str(payment_details.get("transaction_amount") or "0"))
+                payer = payment_details.get("payer")
+
+                with transaction.atomic():
+                    PaymentTransaction.objects.update_or_create(
+                        mp_payment_id=str(payment_details.get("id") or data_id),
+                        defaults={
+                            "subscription": subscription,
+                            "external_reference": ext_ref,
+                            "status": payment_status or "pending",
+                            "status_detail": payment_details.get("status_detail", ""),
+                            "transaction_amount": amount,
+                            "currency_id": payment_details.get("currency_id", "ARS"),
+                            "payment_method_id": payment_details.get("payment_method_id", ""),
+                            "payment_type_id": payment_details.get("payment_type_id", ""),
+                            "payer_email": payer.get("email", "") if isinstance(payer, dict) else "",
+                            "raw_response": payment_details,
+                        },
+                    )
+
+                    if payment_status == "approved" and subscription:
+                        subscription.activate_period()
+
+                webhook_log.processed = True
+                webhook_log.save(update_fields=["processed"])
 
                 logger.info(
                     "Webhook MercadoPago procesado con éxito: payment_id=%s status=%s ref=%s",
@@ -251,10 +361,23 @@ class MercadoPagoWebhookView(APIView):
                     ext_ref,
                 )
             except MercadoPagoServiceError as err:
+                webhook_log.error_message = str(err)
+                webhook_log.save(update_fields=["error_message"])
                 logger.error("Error consultando pago %s en Webhook: %s", data_id, str(err))
                 return Response(
                     {"detail": "Error temporal al verificar el pago."},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
+            except Exception as err:
+                webhook_log.error_message = str(err)
+                webhook_log.save(update_fields=["error_message"])
+                logger.exception("Error persistiendo webhook MercadoPago: %s", str(err))
+                return Response(
+                    {"detail": "Error temporal al procesar el webhook."},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+        else:
+            webhook_log.processed = True
+            webhook_log.save(update_fields=["processed"])
 
         return Response({"received": True, "event_type": event_type}, status=status.HTTP_200_OK)

@@ -8,10 +8,23 @@ from rest_framework import generics
 from rest_framework_simplejwt.views import TokenObtainPairView
 import random
 from django.db import transaction
-from django.db.models import Avg, Case, Count, DateTimeField, F, IntegerField, Q, Value, When
+from django.db.models import (
+        Avg,
+        Case,
+        Count,
+        DateTimeField,
+        Exists,
+        F,
+        IntegerField,
+        OuterRef,
+        Q,
+        Value,
+        When,
+)
 from django.db.models.functions import Concat, Lower
 from django.utils import timezone
 from .models import *
+from .passwords import generate_temporary_password
 from .serializers import *
 from rest_framework.exceptions import ValidationError
 from .permissions import (
@@ -319,18 +332,37 @@ class BookPagination(pagination.PageNumberPagination):
         page_size_query_param = 'page_size' 
         max_page_size = 50                  
 
+
+class AvailableBooksPagination(pagination.PageNumberPagination):
+        page_size = 50
+        page_size_query_param = 'page_size'
+        max_page_size = 100
+
+
 class BookViewSet(viewsets.ModelViewSet):
         """
         Controlador para gestionar los libros (catálogo).
         Permite lectura a lectores y gestión completa al bibliotecario.
         """
-        queryset = Book.objects.select_related('editorial').prefetch_related('authors', 'genres')
+        queryset = Book.objects.filter(deleted_at__isnull=True).select_related('editorial').prefetch_related('authors', 'genres')
         serializer_class = BookWriteSerializer
         permission_classes = [IsLibrarianOrPublicReadOnly]
         pagination_class = BookPagination
 
         def get_queryset(self):
-                qs = Book.objects.select_related('editorial').prefetch_related('authors', 'genres')
+                user = self.request.user
+                is_staff_or_lib = is_librarian_or_admin(user)
+                deleted_only = self.request.query_params.get('deleted_only') in ['true', '1', 'True']
+                include_deleted = self.request.query_params.get('include_deleted') in ['true', '1', 'True']
+
+                if is_staff_or_lib and deleted_only:
+                        qs = Book.objects.filter(deleted_at__isnull=False)
+                elif is_staff_or_lib and include_deleted:
+                        qs = Book.objects.all()
+                else:
+                        qs = Book.objects.filter(deleted_at__isnull=True)
+
+                qs = qs.select_related('editorial').prefetch_related('authors', 'genres')
                 if self.action in ['list', 'retrieve']:
                         qs = qs.prefetch_related('items', 'reservations')
 
@@ -434,7 +466,7 @@ class BookViewSet(viewsets.ModelViewSet):
                 selectores y buscadores en formularios (ItemForm, ItemEditModal).
                 Soporta búsqueda por texto con ?search= o ?q=.
                 """
-                qs = Book.objects.all()
+                qs = Book.objects.filter(deleted_at__isnull=True)
                 search = request.query_params.get('search') or request.query_params.get('q')
 
                 if search:
@@ -457,7 +489,13 @@ class BookViewSet(viewsets.ModelViewSet):
                 serializer = BookOptionSerializer(qs, many=True)
                 return Response(serializer.data)
 
-        @action(detail=False, methods=['get'], permission_classes=[IsLibrarianOrReadOnly], url_path='available')
+        @action(
+                detail=False,
+                methods=['get'],
+                permission_classes=[IsLibrarianOrReadOnly],
+                pagination_class=AvailableBooksPagination,
+                url_path='available',
+        )
         def available_books(self, request, *args, **kwargs):
                 """
                 Devuelve la lista de libros que tienen al menos un ejemplar disponible (Item AVAILABLE),
@@ -472,22 +510,59 @@ class BookViewSet(viewsets.ModelViewSet):
                 search = request.query_params.get('search') or request.query_params.get('q')
                 if search:
                         search = search.strip()
-                        qs = qs.annotate(
+                        matching_authors = Author.objects.filter(
+                                books=OuterRef('pk')
+                        ).annotate(
                                 author_full_name=Concat(
-                                        F('authors__name'),
+                                        F('name'),
                                         Value(' '),
-                                        F('authors__last_name')
+                                        F('last_name'),
                                 )
+                        ).filter(
+                                Q(name__icontains=search) |
+                                Q(last_name__icontains=search) |
+                                Q(author_full_name__icontains=search)
+                        )
+                        matching_items = Item.objects.filter(
+                                book_id=OuterRef('pk'),
+                                inventory_code__icontains=search,
+                        )
+                        qs = qs.annotate(
+                                matches_author=Exists(matching_authors),
+                                matches_item=Exists(matching_items),
                         ).filter(
                                 Q(title__icontains=search) |
                                 Q(isbn__icontains=search) |
-                                Q(authors__name__icontains=search) |
-                                Q(authors__last_name__icontains=search) |
-                                Q(author_full_name__icontains=search) |
-                                Q(items__inventory_code__icontains=search)
-                        ).distinct()
+                                Q(matches_author=True) |
+                                Q(matches_item=True)
+                        )
 
-                serializer = BookAvailableOptionSerializer(qs, many=True, context={'request': request})
+                qs = qs.order_by('title', 'id')
+                page = self.paginate_queryset(qs)
+                serializer = BookAvailableOptionSerializer(
+                                page,
+                                many=True,
+                                context={'request': request},
+                )
+                return self.get_paginated_response(serializer.data)
+
+        @action(detail=True, methods=['post'], permission_classes=[IsLibrarianOrAdminUser], url_path='restore')
+        def restore(self, request, pk=None):
+                """
+                Restaura un libro que fue dado de baja (soft deleted).
+                Permite al bibliotecario o administrador recuperarlo en el catálogo.
+                """
+                try:
+                        book = Book.objects.get(pk=pk, deleted_at__isnull=False)
+                except Book.DoesNotExist:
+                        return Response(
+                                {"detail": "No se encontró un libro eliminado con este ID."},
+                                status=status.HTTP_404_NOT_FOUND
+                        )
+
+                book.deleted_at = None
+                book.save(update_fields=["deleted_at"])
+                serializer = BookDetailSerializer(book, context={'request': request})
                 return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -605,6 +680,23 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
                 return self.request.user
 
 
+class ChangePasswordView(generics.GenericAPIView):
+        serializer_class = ChangePasswordSerializer
+        permission_classes = [permissions.IsAuthenticated]
+
+        def post(self, request, *args, **kwargs):
+                serializer = self.get_serializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+
+                request.user.set_password(serializer.validated_data['new_password'])
+                request.user.save(update_fields=['password'])
+
+                return Response(
+                        {"detail": "La contraseña se actualizó correctamente."},
+                        status=status.HTTP_200_OK,
+                )
+
+
 class UserViewSet(viewsets.ModelViewSet):
         """
         Controlador para que los bibliotecarios y administradores gestionen
@@ -659,8 +751,13 @@ class UserViewSet(viewsets.ModelViewSet):
 
         def create(self, request, *args, **kwargs):
                 data = request.data.copy()
+                temporary_password = None
                 if 'rol' not in data or not data['rol']:
                         data['rol'] = User.Rol.USER
+
+                if not data.get('password'):
+                        temporary_password = generate_temporary_password()
+                        data['password'] = temporary_password
 
                 # Si no se provee username, generarlo automáticamente a partir del DNI o nombre
                 if not data.get('username') or not str(data.get('username')).strip():
@@ -683,6 +780,8 @@ class UserViewSet(viewsets.ModelViewSet):
                 resp_data['active_loans_count'] = 0
                 user_obj = serializer.instance
                 resp_data['full_name'] = user_obj.get_full_name() or user_obj.username
+                if temporary_password:
+                        resp_data['temporary_password'] = temporary_password
 
                 return Response(resp_data, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -1035,16 +1134,20 @@ class RandomBookView(generics.GenericAPIView):
                         if genre_qs.exists():
                                 qs = genre_qs
 
-                book_ids = list(qs.values_list("id", flat=True).distinct())
-                if not book_ids:
+                # Optimización de muestreo aleatorio en BD sin cargar listas de IDs a RAM
+                qs = qs.distinct()
+                total_count = qs.count()
+                if total_count == 0:
                         return Response(
                                 {"detail": "No se encontraron libros disponibles en el catálogo."},
                                 status=status.HTTP_404_NOT_FOUND,
                         )
 
-                random_id = random.choice(book_ids)
+                random_index = random.randint(0, total_count - 1)
+                random_book_id = qs.values_list("id", flat=True)[random_index]
+
                 book = (
-                        Book.objects.filter(id=random_id, deleted_at__isnull=True)
+                        Book.objects.filter(id=random_book_id, deleted_at__isnull=True)
                         .annotate(
                                 avg_rating=Avg(
                                         "reviews__rating",

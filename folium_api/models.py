@@ -5,6 +5,13 @@ from django.db import models
 from django.utils import timezone
 import re
 
+from .billing_models import (
+    LibrarySubscription,
+    PaymentTransaction,
+    SubscriptionPlan,
+    WebhookEventLog,
+)
+
 # Create your models here.
 
 class Author(models.Model):
