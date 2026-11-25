@@ -13,6 +13,7 @@ import random
 from datetime import timedelta
 from pathlib import Path
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import transaction
@@ -239,24 +240,28 @@ class Command(BaseCommand):
             action="store_true",
             help="Borra todos los datos existentes de la app antes de crear los nuevos.",
         )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Permite ejecutar el comando aunque DEBUG sea False (no recomendado en producción).",
+        )
 
     def handle(self, *args, **options):
+        if not settings.DEBUG and not options["force"]:
+            raise CommandError(
+                "seed_data está deshabilitado con DEBUG=False. "
+                "Solo debe ejecutarse en desarrollo o pasando --force explícitamente."
+            )
+
         random.seed(42)  # datos reproducibles
 
         self._validate_data_lengths()
 
         with transaction.atomic():
-            self.stdout.write(self.style.WARNING(
-                "Reiniciando préstamos, reservas y estados de ejemplares..."
-            ))
-            Reservation.objects.all().delete()
-            Loan.objects.all().delete()
-
-            # La seed reconstruye los estados de circulación desde cero.
-            Item.objects.all().update(status=Item.Status.AVAILABLE)
-
             if options["flush"]:
                 self.stdout.write(self.style.WARNING("Borrando datos existentes de folium_api..."))
+                Reservation.objects.all().delete()
+                Loan.objects.all().delete()
                 Review.objects.all().delete()
                 Item.objects.all().delete()
                 Book.objects.all().delete()
@@ -270,8 +275,15 @@ class Command(BaseCommand):
             books = self._seed_books(authors, genres)
             items = self._seed_items(books)
             users = self._seed_users()
-            fully_loaned_books = self._seed_circulation(books, items, users["readers"])
-            self._validate_seeded_circulation(fully_loaned_books)
+            if Loan.objects.exists() or Reservation.objects.exists():
+                self.stdout.write(
+                    self.style.WARNING(
+                        "Préstamos o reservas existentes preservados (usá --flush para reiniciar la circulación)."
+                    )
+                )
+            else:
+                fully_loaned_books = self._seed_circulation(books, items, users["readers"])
+                self._validate_seeded_circulation(fully_loaned_books)
             self._seed_reviews(books, users["readers"])
 
         self.stdout.write(self.style.SUCCESS("\n✅ Seeds cargados correctamente."))
@@ -379,10 +391,6 @@ class Command(BaseCommand):
                         "location": random.choice(UBICACIONES),
                     },
                 )
-                if not created:
-                    item.book = book
-                    item.status = Item.Status.AVAILABLE
-                    item.save(update_fields=["book", "status", "updated_at"])
         items = list(
             Item.objects.filter(book__in=books)
             .select_related("book")

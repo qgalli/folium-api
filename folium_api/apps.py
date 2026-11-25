@@ -18,12 +18,13 @@ class FoliumApiConfig(AppConfig):
     def _run_seed_data(self, **kwargs):
         # No cargar seeds durante los tests automatizados para no
         # contaminar la base de datos de prueba con datos preexistentes.
-        if 'test' in sys.argv:
+        if 'test' in sys.argv or 'pytest' in sys.argv[0]:
             return
 
         # Solo se ejecuta en desarrollo (DEBUG=True), nunca en producción,
         # para evitar cargar datos de prueba en una base de datos real.
-        if os.environ.get('DEBUG', 'False') != 'True':
+        from django.conf import settings
+        if not settings.DEBUG or os.environ.get('DEBUG', 'False') != 'True':
             return
 
         from django.core.management import call_command

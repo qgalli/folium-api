@@ -348,10 +348,7 @@ docker compose exec web python manage.py migrate
 # 4. Optimizar y migrar todas las portadas existentes a WebP
 docker compose exec web python manage.py optimize_covers
 
-# 5. (Opcional) Cargar o actualizar datos semilla con portadas WebP
-docker compose exec web python manage.py seed_data
-
-# 6. Verificar estado de los contenedores y logs
+# 5. Verificar estado de los contenedores y logs (NO ejecutar seed_data en producción)
 docker compose ps
 docker compose logs -f web
 ```

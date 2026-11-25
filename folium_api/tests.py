@@ -1880,3 +1880,55 @@ class PasswordPolicyValidationTests(APITestCase):
         )
         self.assertEqual(patch_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("password", patch_res.data)
+
+
+class SeedDataSafetyTests(APITestCase):
+    def test_seed_data_aborts_when_debug_is_false_without_force(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        from django.test import override_settings
+
+        with override_settings(DEBUG=False):
+            with self.assertRaises(CommandError):
+                call_command("seed_data")
+
+    def test_seed_data_without_flush_preserves_existing_loans_and_reservations(self):
+        import io
+        import tempfile
+        from django.core.management import call_command
+        from django.test import override_settings
+
+        editorial = Editorial.objects.create(name="Editorial Persistente")
+        book = Book.objects.create(title="Libro Existente", editorial=editorial)
+        item = Item.objects.create(
+            book=book,
+            inventory_code="KEEP-001",
+            status=Item.Status.LOANED,
+        )
+        reader = User.objects.create_user(
+            username="keep-reader",
+            dni=91200001,
+            email="keep-reader@example.com",
+            password="StrongKeepPassword-123!",
+        )
+        loan = Loan.objects.create(
+            item=item,
+            user=reader,
+            loaned_at=timezone.now() - timedelta(days=2),
+            due_at=timezone.now() + timedelta(days=12),
+        )
+        reservation = Reservation.objects.create(
+            book=book,
+            user=reader,
+            status=Reservation.StatusReservation.PENDING,
+            expires_at=timezone.now() + timedelta(days=3),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_media:
+            with override_settings(DEBUG=True, MEDIA_ROOT=tmp_media):
+                call_command("seed_data", stdout=io.StringIO(), stderr=io.StringIO())
+
+        self.assertTrue(Loan.objects.filter(pk=loan.pk).exists())
+        self.assertTrue(Reservation.objects.filter(pk=reservation.pk).exists())
+        item.refresh_from_db()
+        self.assertEqual(item.status, Item.Status.LOANED)
