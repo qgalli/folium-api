@@ -15,11 +15,10 @@ services:
 
   # ─── Servicio de la aplicación Django ─────────────────────────────────────
   web:
-    build: .            # Construye la imagen usando el Dockerfile de este directorio
+    build: .            # Construye la imagen y hereda CMD de Gunicorn definido en Dockerfile
     restart: always
-    command: python manage.py runserver 0.0.0.0:8000
     volumes:
-      - .:/app          # Monta el código local en el contenedor (hot reload en desarrollo)
+      - .:/app          # Monta el código y archivos locales en el contenedor
     ports:
       - "8080:8000"     # Expone Django al host en http://localhost:8080
     environment:

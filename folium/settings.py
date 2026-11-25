@@ -92,12 +92,28 @@ TEMPLATES = [
 ]
 
 # En desarrollo (DEBUG=True) se aceptan todos los orígenes para facilitar el trabajo local.
-# En producción (DEBUG=False) solo se permite el origen definido en FRONTEND_URL.
+# En producción (DEBUG=False) solo se permiten los orígenes configurados en FRONTEND_URLS / FRONTEND_URL.
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 
-CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get('FRONTEND_URLS', 'http://localhost:3000').split(',')
+_raw_frontend_urls = os.environ.get('FRONTEND_URLS') or os.environ.get(
+    'FRONTEND_URL',
+    'http://localhost:5173,http://localhost:3000',
+)
+FRONTEND_URLS = [
+    origin.strip().rstrip('/')
+    for origin in _raw_frontend_urls.split(',')
+    if origin.strip()
+]
+FRONTEND_URL = (
+    os.environ.get('FRONTEND_URL')
+    or (FRONTEND_URLS[0] if FRONTEND_URLS else 'http://localhost:5173')
+).strip().rstrip('/')
+
+CORS_ALLOWED_ORIGINS = FRONTEND_URLS
+
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip().rstrip('/')
+    for origin in os.environ.get('CSRF_TRUSTED_ORIGINS', ','.join(FRONTEND_URLS)).split(',')
     if origin.strip()
 ]
 
@@ -180,6 +196,18 @@ STATIC_URL = 'static/'
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+def get_default_authentication_classes(debug: bool):
+    classes = [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ]
+    if debug:
+        classes.append('rest_framework.authentication.BasicAuthentication')
+    return classes
+
+
+_DEFAULT_AUTH_CLASSES = get_default_authentication_classes(DEBUG)
+
 # ─── Django REST Framework ────────────────────────────────────────────────────
 REST_FRAMEWORK = {
     # Por defecto, solo usuarios autenticados pueden acceder a la API
@@ -187,12 +215,8 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ],
     'EXCEPTION_HANDLER': 'folium_api.exceptions.custom_exception_handler',
-    # Autenticación por JWT, sesión (navegador) y básica (para desarrollo)
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication', 
-        'rest_framework.authentication.SessionAuthentication',
-        'rest_framework.authentication.BasicAuthentication',
-    ],
+    # Autenticación por JWT y sesión; Basic solo habilitada en desarrollo (DEBUG=True)
+    'DEFAULT_AUTHENTICATION_CLASSES': _DEFAULT_AUTH_CLASSES,
     # Throttling / Rate Limiting defensivo contra fuerza bruta y DoS
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
@@ -213,10 +237,21 @@ SIMPLE_JWT = {
     'BLACKLIST_AFTER_ROTATION': True,
 }
 
-# ─── Cabeceras de Seguridad HTTP en Django ────────────────────────────────────
+# ─── Cabeceras de Seguridad HTTP y Proxy en Producción ───────────────────────
 SECURE_CONTENT_TYPE_NOSNIFF = True
-SECURE_BROWSER_XSS_FILTER = True
 X_FRAME_OPTIONS = 'DENY'
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+NUM_PROXIES = int(os.environ.get('NUM_PROXIES', '1'))
+
+# Solo activar redirección/cookies Secure cuando exista proxy HTTPS delante de Django
+ENABLE_HTTPS_REDIRECT = os.environ.get('ENABLE_HTTPS_REDIRECT', 'False') == 'True'
+if not DEBUG and ENABLE_HTTPS_REDIRECT:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', '31536000'))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = os.environ.get('SECURE_HSTS_PRELOAD', 'False') == 'True'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

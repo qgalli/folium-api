@@ -16,3 +16,4 @@ python-dotenv==1.2.3
 sqlparse==0.6.0
 typing_extensions==4.16.0
 mercadopago>=2.2.0
+gunicorn>=23.0.0

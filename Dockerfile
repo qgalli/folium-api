@@ -19,6 +19,6 @@ COPY . .
 # Exponemos el puerto en el que corre Django
 EXPOSE 8000
 
-# Iniciamos el servidor de desarrollo de Django
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# Iniciamos el servidor WSGI de producción con Gunicorn
+CMD ["gunicorn", "folium.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "120"]
 

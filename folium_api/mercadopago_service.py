@@ -232,7 +232,12 @@ class MercadoPagoService:
             or os.environ.get("MERCADOPAGO_WEBHOOK_SECRET")
             or ""
         ).strip()
-        self.frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+        configured_frontends = getattr(settings, "FRONTEND_URLS", []) or []
+        self.frontend_url = (
+            os.environ.get("FRONTEND_URL")
+            or getattr(settings, "FRONTEND_URL", "")
+            or (configured_frontends[0] if configured_frontends else "http://localhost:5173")
+        ).strip().rstrip("/")
         self.backend_url = (
             os.environ.get("BACKEND_PUBLIC_URL")
             or os.environ.get("BACKEND_URL")

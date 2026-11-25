@@ -2536,3 +2536,26 @@ class LoanConcurrencyAndIntegrityTests(APITestCase):
         )
         self.assertEqual(reopen_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("returned_at", reopen_res.data)
+
+
+class ProductionHardeningSettingsTests(SimpleTestCase):
+    def test_production_defaults_disable_basic_auth_and_preserve_proxy_safety(self):
+        from django.conf import settings
+        from folium.settings import get_default_authentication_classes
+        from folium_api.mercadopago_service import MercadoPagoService
+
+        prod_auth = get_default_authentication_classes(False)
+        dev_auth = get_default_authentication_classes(True)
+        self.assertNotIn("rest_framework.authentication.BasicAuthentication", prod_auth)
+        self.assertIn("rest_framework.authentication.BasicAuthentication", dev_auth)
+
+        self.assertFalse(hasattr(settings, "SECURE_BROWSER_XSS_FILTER"))
+        self.assertEqual(settings.SECURE_PROXY_SSL_HEADER, ("HTTP_X_FORWARDED_PROTO", "https"))
+        self.assertGreaterEqual(settings.NUM_PROXIES, 1)
+        self.assertFalse(settings.ENABLE_HTTPS_REDIRECT)
+        self.assertTrue(settings.CSRF_TRUSTED_ORIGINS)
+
+        with override_settings(FRONTEND_URL="", FRONTEND_URLS=["https://folium.example.com"]):
+            with patch.dict("os.environ", {"FRONTEND_URL": ""}, clear=False):
+                service = MercadoPagoService()
+                self.assertEqual(service.frontend_url, "https://folium.example.com")
