@@ -2017,3 +2017,41 @@ class TrailingSlashPostRoutesTests(APITestCase):
         )
         self.assertNotEqual(webhook_res.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
         self.assertEqual(webhook_res.status_code, status.HTTP_200_OK)
+
+
+class FavoriteBehaviorTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="fav-reader",
+            dni=91500001,
+            email="fav-reader@example.com",
+            password="StrongPassword-123!",
+        )
+        self.editorial = Editorial.objects.create(name="Fav Editorial")
+        self.book = Book.objects.create(title="Libro Favorito", editorial=self.editorial)
+        self.deleted_book = Book.objects.create(
+            title="Libro Eliminado",
+            editorial=self.editorial,
+            deleted_at=timezone.now(),
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_duplicate_favorite_returns_200_and_soft_deleted_book_returns_400(self):
+        first = self.client.post("/api/v1/favorites/", {"book": self.book.id}, format="json")
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+
+        second = self.client.post("/api/v1/favorites/", {"book": self.book.id}, format="json")
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data["id"], second.data["id"])
+        self.assertEqual(
+            User.favorites.through.objects.filter(user=self.user, book=self.book).count(),
+            1,
+        )
+
+        deleted_res = self.client.post(
+            "/api/v1/favorites/",
+            {"book": self.deleted_book.id},
+            format="json",
+        )
+        self.assertEqual(deleted_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("book", deleted_res.data)

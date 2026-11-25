@@ -1149,6 +1149,11 @@ class FavoriteSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "user"]
 
+    def validate_book(self, book):
+        if book.deleted_at is not None:
+            raise serializers.ValidationError("No se puede agregar a favoritos un libro eliminado.")
+        return book
+
     def create(self, validated_data):
         favorite, _ = self.Meta.model.objects.get_or_create(**validated_data)
         return favorite

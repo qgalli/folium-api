@@ -650,6 +650,21 @@ class FavoriteViewSet(viewsets.ModelViewSet):
                         user=self.request.user
                 ).select_related('user', 'book__editorial')
 
+        def create(self, request, *args, **kwargs):
+                serializer = self.get_serializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+                favorite, created = User.favorites.through.objects.get_or_create(
+                        user=request.user,
+                        book=serializer.validated_data['book'],
+                )
+                output_serializer = self.get_serializer(favorite)
+                headers = self.get_success_headers(output_serializer.data) if created else {}
+                return Response(
+                        output_serializer.data,
+                        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+                        headers=headers,
+                )
+
         def perform_create(self, serializer):
                 # Asocia el favorito a la persona que mandó el token
                 serializer.save(user=self.request.user)
