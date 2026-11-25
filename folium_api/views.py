@@ -18,6 +18,7 @@ from django.db.models import (
         F,
         IntegerField,
         OuterRef,
+        Prefetch,
         Q,
         Value,
         When,
@@ -135,7 +136,14 @@ class ItemViewSet(viewsets.ModelViewSet):
                         'book__authors',
                         'book__genres',
                         'book__items',
-                        'book__reservations',
+                        Prefetch(
+                                'book__reservations',
+                                queryset=Reservation.objects.filter(
+                                        status=Reservation.StatusReservation.PENDING,
+                                        item__isnull=True,
+                                ),
+                                to_attr='prefetched_pending_reservations',
+                        ),
                 )
 
                 search = self.request.query_params.get('search') or self.request.query_params.get('q')
@@ -468,7 +476,17 @@ class BookViewSet(viewsets.ModelViewSet):
 
                 qs = qs.select_related('editorial').prefetch_related('authors', 'genres')
                 if self.action in ['list', 'retrieve']:
-                        qs = qs.prefetch_related('items', 'reservations')
+                        qs = qs.prefetch_related(
+                                'items',
+                                Prefetch(
+                                        'reservations',
+                                        queryset=Reservation.objects.filter(
+                                                status=Reservation.StatusReservation.PENDING,
+                                                item__isnull=True,
+                                        ),
+                                        to_attr='prefetched_pending_reservations',
+                                ),
+                        )
 
                 genre = self.request.query_params.get('genre')
                 year = self.request.query_params.get('year')
@@ -609,7 +627,15 @@ class BookViewSet(viewsets.ModelViewSet):
                 qs = Book.objects.filter(
                         deleted_at__isnull=True,
                         items__status=Item.Status.AVAILABLE
-                ).select_related('editorial').prefetch_related('authors', 'genres', 'items').distinct()
+                ).select_related('editorial').prefetch_related(
+                        'authors',
+                        'genres',
+                        Prefetch(
+                                'items',
+                                queryset=Item.objects.filter(status=Item.Status.AVAILABLE),
+                                to_attr='prefetched_available_items',
+                        ),
+                ).distinct()
 
                 search = request.query_params.get('search') or request.query_params.get('q')
                 if search:
@@ -1274,7 +1300,19 @@ class RandomBookView(generics.GenericAPIView):
                                         filter=Q(reviews__deleted_at__isnull=True),
                                 )
                         )
-                        .prefetch_related("authors", "genres", "items", "reservations")
+                        .prefetch_related(
+                                "authors",
+                                "genres",
+                                "items",
+                                Prefetch(
+                                        "reservations",
+                                        queryset=Reservation.objects.filter(
+                                                status=Reservation.StatusReservation.PENDING,
+                                                item__isnull=True,
+                                        ),
+                                        to_attr="prefetched_pending_reservations",
+                                ),
+                        )
                         .first()
                 )
 
@@ -1315,7 +1353,19 @@ class BookRecommendationView(generics.GenericAPIView):
                                 F("review_count").desc(),
                                 "-id",
                         )
-                        .prefetch_related("authors", "genres", "items", "reservations")[:10]
+                        .prefetch_related(
+                                "authors",
+                                "genres",
+                                "items",
+                                Prefetch(
+                                        "reservations",
+                                        queryset=Reservation.objects.filter(
+                                                status=Reservation.StatusReservation.PENDING,
+                                                item__isnull=True,
+                                        ),
+                                        to_attr="prefetched_pending_reservations",
+                                ),
+                        )[:10]
                 )
 
                 serializer = self.get_serializer(books, many=True, context={"request": request})

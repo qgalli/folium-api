@@ -2588,3 +2588,88 @@ class CatalogDeterministicOrderingTests(APITestCase):
             item["id"] for item in page2.data["results"]
         ]
         self.assertEqual(ids_returned, [self.b2.id, self.b1.id, self.b3.id, self.b4.id])
+
+
+class QueryOptimizationNPlusOneTests(APITestCase):
+    def setUp(self):
+        self.editorial = Editorial.objects.create(name="Perf Editorial")
+        self.author = Author.objects.create(name="Ada", last_name="Lovelace")
+        self.genre = Genre.objects.create(name="Ciencia")
+        self.librarian = User.objects.create_user(
+            username="perf-lib",
+            dni=91900001,
+            email="perf-lib@example.com",
+            password="StrongPassword-123!",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.reader = User.objects.create_user(
+            username="perf-reader",
+            dni=91900002,
+            email="perf-reader@example.com",
+            password="StrongPassword-123!",
+        )
+
+    def _create_books(self, start_idx, count):
+        for idx in range(start_idx, start_idx + count):
+            book = Book.objects.create(
+                title=f"Libro Perf {idx:02d}",
+                editorial=self.editorial,
+                publication_year=2020,
+            )
+            book.authors.add(self.author)
+            book.genres.add(self.genre)
+            Item.objects.create(
+                book=book,
+                inventory_code=f"PERF-{idx:03d}-A",
+                status=Item.Status.AVAILABLE,
+            )
+            Item.objects.create(
+                book=book,
+                inventory_code=f"PERF-{idx:03d}-L",
+                status=Item.Status.LOANED,
+            )
+            if idx % 2 == 0:
+                Reservation.objects.create(
+                    book=book,
+                    user=self.reader,
+                    status=Reservation.StatusReservation.PENDING,
+                    expires_at=timezone.now() + timedelta(days=3),
+                )
+
+    def test_book_list_available_items_and_recommendations_scale_in_constant_queries(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._create_books(1, 2)
+
+        def measure(url):
+            with CaptureQueriesContext(connection) as ctx:
+                res = self.client.get(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            return len(ctx), res.data
+
+        q_books_2, data_books_2 = measure("/api/v1/book/?page_size=20")
+        q_recs_2, _ = measure("/api/v1/recommendation/")
+        self.client.force_authenticate(user=self.librarian)
+        q_avail_2, _ = measure("/api/v1/book/available/?page_size=20")
+        q_items_2, _ = measure("/api/v1/items/?page_size=20")
+
+        # Verify stock calculation remained accurate with unassigned pending reservation
+        first_book_payload = data_books_2["results"][0]
+        self.assertEqual(first_book_payload["total_items"], 2)
+        self.assertEqual(first_book_payload["available_items"], 1)
+
+        # Add 8 more books (with 16 items + reservations) -> query counts must stay O(1)
+        self.client.force_authenticate(user=None)
+        self._create_books(3, 8)
+
+        q_books_10, _ = measure("/api/v1/book/?page_size=20")
+        q_recs_10, _ = measure("/api/v1/recommendation/")
+        self.client.force_authenticate(user=self.librarian)
+        q_avail_10, _ = measure("/api/v1/book/available/?page_size=20")
+        q_items_10, _ = measure("/api/v1/items/?page_size=20")
+
+        self.assertEqual(q_books_10, q_books_2)
+        self.assertEqual(q_recs_10, q_recs_2)
+        self.assertEqual(q_avail_10, q_avail_2)
+        self.assertEqual(q_items_10, q_items_2)

@@ -573,6 +573,28 @@ class BookSimpleSerializer(serializers.ModelSerializer):
         ]
 
 
+def _get_book_items(obj):
+    if hasattr(obj, "prefetched_items"):
+        return obj.prefetched_items
+    return list(obj.items.all())
+
+
+def _get_available_book_items(obj):
+    if hasattr(obj, "prefetched_available_items"):
+        return obj.prefetched_available_items
+    return [item for item in _get_book_items(obj) if item.status == Item.Status.AVAILABLE]
+
+
+def _get_unassigned_pending_reservations_count(obj):
+    if hasattr(obj, "prefetched_pending_reservations"):
+        return len(obj.prefetched_pending_reservations)
+    return sum(
+        1
+        for r in obj.reservations.all()
+        if r.status == Reservation.StatusReservation.PENDING and r.item_id is None
+    )
+
+
 class BookAvailableOptionSerializer(serializers.ModelSerializer):
     """
     Serializador de libros que tienen ejemplares físicos disponibles,
@@ -598,12 +620,12 @@ class BookAvailableOptionSerializer(serializers.ModelSerializer):
             "available_items",
             "available_count",
         ]
+
     def get_available_items(self, obj):
-        items = obj.items.filter(status=Item.Status.AVAILABLE)
-        return ItemSummarySerializer(items, many=True).data
+        return ItemSummarySerializer(_get_available_book_items(obj), many=True).data
 
     def get_available_count(self, obj):
-        return obj.items.filter(status=Item.Status.AVAILABLE).count()
+        return len(_get_available_book_items(obj))
 
 
 class EditorialPrimaryKeyOrNameField(serializers.PrimaryKeyRelatedField):
@@ -741,15 +763,13 @@ class BookListSerializer(serializers.ModelSerializer):
         ]
 
     def get_total_items(self, obj):
-        return obj.items.count()
+        return len(_get_book_items(obj))
 
     def get_available_items(self, obj):
-        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
-        pending_reservations = obj.reservations.filter(
-            status=Reservation.StatusReservation.PENDING,
-            item__isnull=True,
-        ).count()
-        return max(0, available - pending_reservations)
+        return max(
+            0,
+            len(_get_available_book_items(obj)) - _get_unassigned_pending_reservations_count(obj),
+        )
 
     def get_is_available(self, obj):
         return self.get_available_items(obj) > 0
@@ -823,15 +843,13 @@ class BookDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_total_items(self, obj):
-        return obj.items.count()
+        return len(_get_book_items(obj))
 
     def get_available_items(self, obj):
-        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
-        pending_reservations = obj.reservations.filter(
-            status=Reservation.StatusReservation.PENDING,
-            item__isnull=True,
-        ).count()
-        return max(0, available - pending_reservations)
+        return max(
+            0,
+            len(_get_available_book_items(obj)) - _get_unassigned_pending_reservations_count(obj),
+        )
 
 
 
@@ -885,31 +903,28 @@ class BookRecommendationSerializer(serializers.ModelSerializer):
         return self.get_cover(obj)
 
     def get_author(self, obj):
-        authors = obj.authors.all()
-        return ", ".join(f"{a.name} {a.last_name}".strip() for a in authors) if authors.exists() else None
+        authors = list(obj.authors.all())
+        return ", ".join(f"{a.name} {a.last_name}".strip() for a in authors) or None
 
     def get_category(self, obj):
-        first_genre = obj.genres.first()
-        return first_genre.name if first_genre else None
+        genres = list(obj.genres.all())
+        return genres[0].name if genres else None
 
     def get_rating(self, obj):
-        avg = getattr(obj, "avg_rating", None)
-        if avg is not None:
-            return round(float(avg), 2)
+        if hasattr(obj, "avg_rating"):
+            return round(float(avg), 2) if (avg := obj.avg_rating) is not None else None
         active_reviews = obj.reviews.filter(deleted_at__isnull=True)
         avg_aggregate = active_reviews.aggregate(avg=Avg("rating"))["avg"]
         return round(float(avg_aggregate), 2) if avg_aggregate is not None else None
 
     def get_total_items(self, obj):
-        return obj.items.count()
+        return len(_get_book_items(obj))
 
     def get_available_items(self, obj):
-        available = obj.items.filter(status=Item.Status.AVAILABLE).count()
-        pending_reservations = obj.reservations.filter(
-            status=Reservation.StatusReservation.PENDING,
-            item__isnull=True,
-        ).count()
-        return max(0, available - pending_reservations)
+        return max(
+            0,
+            len(_get_available_book_items(obj)) - _get_unassigned_pending_reservations_count(obj),
+        )
 
 
 # ==========================================
