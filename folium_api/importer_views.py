@@ -28,6 +28,40 @@ COVER_HTTP_HEADERS = {
 
 from .permissions import IsLibrarianOrAdminUser
 
+MAX_IMPORT_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_XLSX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_IMPORT_ROWS = 10_000
+_UNSAFE_XML_PATTERN = re.compile(rb"<!\s*(DOCTYPE|ENTITY)\b", re.IGNORECASE)
+
+
+class UnsafeImportError(ValueError):
+    """Error de seguridad o límites excedidos al parsear archivos de importación."""
+
+
+def _validate_safe_xml_bytes(raw_bytes):
+    if _UNSAFE_XML_PATTERN.search(raw_bytes):
+        raise UnsafeImportError("El archivo XML contiene declaraciones DOCTYPE o ENTITY no permitidas.")
+
+
+def _read_zip_entry_safely(zf, member_name, remaining_budget):
+    info = zf.getinfo(member_name)
+    if info.file_size > remaining_budget:
+        raise UnsafeImportError("El archivo Excel supera el tamaño máximo descomprimido permitido.")
+    chunks = []
+    read_total = 0
+    with zf.open(info, "r") as fp:
+        while True:
+            chunk = fp.read(min(65536, remaining_budget - read_total + 1))
+            if not chunk:
+                break
+            read_total += len(chunk)
+            if read_total > remaining_budget:
+                raise UnsafeImportError("El archivo Excel supera el tamaño máximo descomprimido permitido.")
+            chunks.append(chunk)
+    data = b"".join(chunks)
+    _validate_safe_xml_bytes(data)
+    return data, remaining_budget - len(data)
+
 
 def _clean_str(val):
     if val is None:
@@ -450,63 +484,83 @@ def parse_csv_file(file_bytes):
 def parse_xlsx_file(file_bytes):
     # Parser nativo de XLSX usando zipfile y ElementTree estándar con alineación por coordenada de celda
     try:
-        zf = zipfile.ZipFile(io.BytesIO(file_bytes))
-        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-        shared_strings = []
-        if "xl/sharedStrings.xml" in zf.namelist():
-            ss_tree = ET.fromstring(zf.read("xl/sharedStrings.xml"))
-            for si in ss_tree.findall(f"{ns}si"):
-                shared_strings.append("".join(si.itertext()))
+        if len(file_bytes) > MAX_IMPORT_BYTES:
+            raise UnsafeImportError(
+                f"El archivo Excel supera el tamaño máximo permitido ({MAX_IMPORT_BYTES // (1024 * 1024)} MB)."
+            )
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            total_declared_size = sum(info.file_size for info in zf.infolist())
+            if total_declared_size > MAX_XLSX_UNCOMPRESSED_BYTES:
+                raise UnsafeImportError("El archivo Excel supera el tamaño máximo descomprimido permitido.")
 
-        sheet_xml = zf.read("xl/worksheets/sheet1.xml")
-        sheet_tree = ET.fromstring(sheet_xml)
+            remaining_budget = MAX_XLSX_UNCOMPRESSED_BYTES
+            ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+            shared_strings = []
+            if "xl/sharedStrings.xml" in zf.namelist():
+                ss_bytes, remaining_budget = _read_zip_entry_safely(
+                    zf, "xl/sharedStrings.xml", remaining_budget
+                )
+                ss_tree = ET.fromstring(ss_bytes)
+                for si in ss_tree.findall(f"{ns}si"):
+                    shared_strings.append("".join(si.itertext()))
 
-        matrix = []
-        for row in sheet_tree.iter(f"{ns}row"):
-            row_cells = {}
-            next_col_idx = 0
-            for c in row.iter(f"{ns}c"):
-                col_idx = _excel_col_to_index(c.get("r"))
-                if col_idx is None:
-                    col_idx = next_col_idx
-                next_col_idx = col_idx + 1
+            sheet_xml, _ = _read_zip_entry_safely(
+                zf, "xl/worksheets/sheet1.xml", remaining_budget
+            )
+            sheet_tree = ET.fromstring(sheet_xml)
 
-                cell_type = c.get("t")
-                cell_val = ""
-                if cell_type == "inlineStr":
-                    is_el = c.find(f"{ns}is")
-                    cell_val = "".join(is_el.itertext()) if is_el is not None else ""
-                else:
-                    v_el = c.find(f"{ns}v")
-                    if v_el is not None and v_el.text is not None:
-                        raw_val = v_el.text
-                        if cell_type == "s":
-                            idx = int(raw_val)
-                            cell_val = shared_strings[idx] if idx < len(shared_strings) else ""
-                        else:
-                            cell_val = raw_val
+            matrix = []
+            for row in sheet_tree.iter(f"{ns}row"):
+                row_cells = {}
+                next_col_idx = 0
+                for c in row.iter(f"{ns}c"):
+                    col_idx = _excel_col_to_index(c.get("r"))
+                    if col_idx is None:
+                        col_idx = next_col_idx
+                    next_col_idx = col_idx + 1
 
-                row_cells[col_idx] = cell_val
+                    cell_type = c.get("t")
+                    cell_val = ""
+                    if cell_type == "inlineStr":
+                        is_el = c.find(f"{ns}is")
+                        cell_val = "".join(is_el.itertext()) if is_el is not None else ""
+                    else:
+                        v_el = c.find(f"{ns}v")
+                        if v_el is not None and v_el.text is not None:
+                            raw_val = v_el.text
+                            if cell_type == "s":
+                                idx = int(raw_val)
+                                cell_val = shared_strings[idx] if idx < len(shared_strings) else ""
+                            else:
+                                cell_val = raw_val
 
-            if row_cells and any(_clean_str(v) for v in row_cells.values()):
-                max_col = max(row_cells.keys())
-                row_vals = [row_cells.get(i, "") for i in range(max_col + 1)]
-                matrix.append(row_vals)
+                    row_cells[col_idx] = cell_val
 
-        if not matrix:
-            return [], []
+                if row_cells and any(_clean_str(v) for v in row_cells.values()):
+                    max_col = max(row_cells.keys())
+                    row_vals = [row_cells.get(i, "") for i in range(max_col + 1)]
+                    matrix.append(row_vals)
+                    if len(matrix) - 1 > MAX_IMPORT_ROWS:
+                        raise UnsafeImportError(
+                            f"El archivo supera el límite máximo de {MAX_IMPORT_ROWS} filas."
+                        )
 
-        headers = [_clean_str(h) for h in matrix[0]]
-        rows = []
-        for r in matrix[1:]:
-            row_dict = {}
-            for idx, h in enumerate(headers):
-                if h:
-                    row_dict[h] = _clean_str(r[idx]) if idx < len(r) else ""
-            if any(row_dict.values()):
-                rows.append(row_dict)
+            if not matrix:
+                return [], []
 
-        return headers, rows
+            headers = [_clean_str(h) for h in matrix[0]]
+            rows = []
+            for r in matrix[1:]:
+                row_dict = {}
+                for idx, h in enumerate(headers):
+                    if h:
+                        row_dict[h] = _clean_str(r[idx]) if idx < len(r) else ""
+                if any(row_dict.values()):
+                    rows.append(row_dict)
+
+            return headers, rows
+    except UnsafeImportError:
+        raise
     except Exception as e:
         raise ValueError(f"No se pudo procesar el archivo Excel: {str(e)}")
 
@@ -1007,6 +1061,12 @@ def parse_marcxml_bytes(file_bytes):
     Parser nativo de registros bibliográficos MARCXML (.xml, .marcxml) según el esquema
     oficial de la Library of Congress (LOC MARC 21 XML Schema).
     """
+    if len(file_bytes) > MAX_IMPORT_BYTES:
+        raise UnsafeImportError(
+            f"El archivo MARCXML supera el tamaño máximo permitido ({MAX_IMPORT_BYTES // (1024 * 1024)} MB)."
+        )
+    _validate_safe_xml_bytes(file_bytes)
+
     for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
         try:
             text = file_bytes.decode(enc)
@@ -1015,6 +1075,9 @@ def parse_marcxml_bytes(file_bytes):
             continue
     else:
         text = file_bytes.decode("utf-8", errors="replace")
+
+    if re.search(r"<!\s*(DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
+        raise UnsafeImportError("El archivo XML contiene declaraciones DOCTYPE o ENTITY no permitidas.")
 
     try:
         root = ET.fromstring(text)
@@ -1050,6 +1113,10 @@ def parse_marcxml_bytes(file_bytes):
             row = parse_marc_record_fields(fields, control_fields, leader)
             if row.get("title") or row.get("author"):
                 rows.append(row)
+                if len(rows) > MAX_IMPORT_ROWS:
+                    raise UnsafeImportError(
+                        f"El archivo supera el límite máximo de {MAX_IMPORT_ROWS} registros."
+                    )
                 for k in row.keys():
                     if row[k]:
                         headers_set.add(k)
@@ -1060,10 +1127,7 @@ def parse_marcxml_bytes(file_bytes):
     return sorted_headers, rows
 
 
-def parse_uploaded_file(uploaded_file):
-    name = (uploaded_file.name or "").lower()
-    file_bytes = uploaded_file.read()
-
+def _dispatch_parse(name, file_bytes):
     if name.endswith(".xlsx"):
         return parse_xlsx_file(file_bytes)
     elif name.endswith(".bib"):
@@ -1076,6 +1140,8 @@ def parse_uploaded_file(uploaded_file):
             return parse_marcxml_bytes(file_bytes)
         try:
             return parse_marcxml_bytes(file_bytes)
+        except UnsafeImportError:
+            raise
         except Exception:
             return parse_xlsx_file(file_bytes)
     elif name.endswith((".csv", ".tsv", ".txt")):
@@ -1083,6 +1149,8 @@ def parse_uploaded_file(uploaded_file):
         if len(file_bytes) >= 24 and file_bytes[:5].isdigit() and b"\x1e" in file_bytes[:1024]:
             try:
                 return parse_marc21_bytes(file_bytes)
+            except UnsafeImportError:
+                raise
             except Exception:
                 pass
 
@@ -1092,6 +1160,8 @@ def parse_uploaded_file(uploaded_file):
         if "<record" in sample_head_lower or "<collection" in sample_head_lower:
             try:
                 return parse_marcxml_bytes(file_bytes)
+            except UnsafeImportError:
+                raise
             except Exception:
                 pass
 
@@ -1099,6 +1169,8 @@ def parse_uploaded_file(uploaded_file):
         if re.search(r"@([a-zA-Z]+)\s*\{\s*([^,\s\}]+)\s*,", sample_head):
             try:
                 return parse_bib_file(file_bytes)
+            except UnsafeImportError:
+                raise
             except Exception:
                 pass
 
@@ -1108,6 +1180,8 @@ def parse_uploaded_file(uploaded_file):
         if len(file_bytes) >= 24 and file_bytes[:5].isdigit() and b"\x1e" in file_bytes[:1024]:
             try:
                 return parse_marc21_bytes(file_bytes)
+            except UnsafeImportError:
+                raise
             except Exception:
                 pass
 
@@ -1116,19 +1190,47 @@ def parse_uploaded_file(uploaded_file):
         if "<record" in sample_head_lower or "<collection" in sample_head_lower:
             try:
                 return parse_marcxml_bytes(file_bytes)
+            except UnsafeImportError:
+                raise
             except Exception:
                 pass
 
         if re.search(r"@([a-zA-Z]+)\s*\{\s*([^,\s\}]+)\s*,", sample_head):
             try:
                 return parse_bib_file(file_bytes)
+            except UnsafeImportError:
+                raise
             except Exception:
                 pass
 
         try:
             return parse_csv_file(file_bytes)
+        except UnsafeImportError:
+            raise
         except Exception:
             return parse_xlsx_file(file_bytes)
+
+
+def parse_uploaded_file(uploaded_file):
+    declared_size = getattr(uploaded_file, "size", None)
+    if declared_size is not None and declared_size > MAX_IMPORT_BYTES:
+        raise UnsafeImportError(
+            f"El archivo supera el tamaño máximo permitido ({MAX_IMPORT_BYTES // (1024 * 1024)} MB)."
+        )
+
+    name = (uploaded_file.name or "").lower()
+    file_bytes = uploaded_file.read(MAX_IMPORT_BYTES + 1)
+    if len(file_bytes) > MAX_IMPORT_BYTES:
+        raise UnsafeImportError(
+            f"El archivo supera el tamaño máximo permitido ({MAX_IMPORT_BYTES // (1024 * 1024)} MB)."
+        )
+
+    headers, rows = _dispatch_parse(name, file_bytes)
+    if len(rows) > MAX_IMPORT_ROWS:
+        raise UnsafeImportError(
+            f"El archivo supera el límite máximo de {MAX_IMPORT_ROWS} filas."
+        )
+    return headers, rows
 
 
 def auto_suggest_mapping(headers):

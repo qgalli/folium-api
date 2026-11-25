@@ -2673,3 +2673,87 @@ class QueryOptimizationNPlusOneTests(APITestCase):
         self.assertEqual(q_recs_10, q_recs_2)
         self.assertEqual(q_avail_10, q_avail_2)
         self.assertEqual(q_items_10, q_items_2)
+
+
+class ImporterSecurityLimitsTests(APITestCase):
+    def setUp(self):
+        self.librarian = User.objects.create_user(
+            username="imp-sec-lib",
+            dni=92000001,
+            email="imp-sec-lib@example.com",
+            password="StrongPassword-123!",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.client.force_authenticate(user=self.librarian)
+
+    def _build_xlsx(self, sheet_xml_bytes, shared_strings_xml=None):
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            if shared_strings_xml is not None:
+                zf.writestr("xl/sharedStrings.xml", shared_strings_xml)
+            zf.writestr("xl/worksheets/sheet1.xml", sheet_xml_bytes)
+        return buf.getvalue()
+
+    def test_preview_rejects_oversized_file_xxe_zip_bomb_and_excess_rows(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        # 1. File larger than MAX_IMPORT_BYTES rejected with 400
+        with patch("folium_api.importer_views.MAX_IMPORT_BYTES", 64):
+            big_csv = SimpleUploadedFile(
+                "big.csv",
+                b"title,author\n" + b"Libro,Autor\n" * 10,
+                content_type="text/csv",
+            )
+            res_size = self.client.post("/api/v1/importer/preview/", {"file": big_csv}, format="multipart")
+            self.assertEqual(res_size.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 2. MARCXML with DOCTYPE/ENTITY rejected with 400
+        xxe_xml = (
+            b'<?xml version="1.0"?>'
+            b'<!DOCTYPE collection [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+            b'<collection><record><datafield tag="245"><subfield code="a">&xxe;</subfield></datafield></record></collection>'
+        )
+        res_xxe = self.client.post(
+            "/api/v1/importer/preview/",
+            {"file": SimpleUploadedFile("xxe.xml", xxe_xml, content_type="text/xml")},
+            format="multipart",
+        )
+        self.assertEqual(res_xxe.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 3. XLSX with DOCTYPE inside sheet1.xml rejected with 400
+        xxe_xlsx = self._build_xlsx(
+            b'<?xml version="1.0"?><!DOCTYPE worksheet><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
+        )
+        res_xlsx_xxe = self.client.post(
+            "/api/v1/importer/preview/",
+            {"file": SimpleUploadedFile("xxe.xlsx", xxe_xlsx, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            format="multipart",
+        )
+        self.assertEqual(res_xlsx_xxe.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 4. XLSX zip bomb exceeding MAX_XLSX_UNCOMPRESSED_BYTES rejected with 400
+        bomb_xlsx = self._build_xlsx(
+            b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+            + b'<row><c t="inlineStr"><is><t>' + b'A' * 5000 + b'</t></is></c></row>'
+            + b'</sheetData></worksheet>'
+        )
+        with patch("folium_api.importer_views.MAX_XLSX_UNCOMPRESSED_BYTES", 2048):
+            res_bomb = self.client.post(
+                "/api/v1/importer/preview/",
+                {"file": SimpleUploadedFile("bomb.xlsx", bomb_xlsx, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                format="multipart",
+            )
+            self.assertEqual(res_bomb.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 5. CSV exceeding MAX_IMPORT_ROWS rejected with 400
+        with patch("folium_api.importer_views.MAX_IMPORT_ROWS", 2):
+            many_rows = SimpleUploadedFile(
+                "many.csv",
+                b"title,author\nA,1\nB,2\nC,3\n",
+                content_type="text/csv",
+            )
+            res_rows = self.client.post("/api/v1/importer/preview/", {"file": many_rows}, format="multipart")
+            self.assertEqual(res_rows.status_code, status.HTTP_400_BAD_REQUEST)
