@@ -2559,3 +2559,32 @@ class ProductionHardeningSettingsTests(SimpleTestCase):
             with patch.dict("os.environ", {"FRONTEND_URL": ""}, clear=False):
                 service = MercadoPagoService()
                 self.assertEqual(service.frontend_url, "https://folium.example.com")
+
+
+class CatalogDeterministicOrderingTests(APITestCase):
+    def setUp(self):
+        self.editorial = Editorial.objects.create(name="Order Editorial")
+        self.b1 = Book.objects.create(title="Mismo Título", editorial=self.editorial)
+        self.b2 = Book.objects.create(title="Alpha", editorial=self.editorial)
+        self.b3 = Book.objects.create(title="Mismo Título", editorial=self.editorial)
+        self.b4 = Book.objects.create(title="Zeta", editorial=self.editorial)
+
+    def test_book_pagination_has_no_unordered_warning_and_deterministic_tie_break(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            page1 = self.client.get("/api/v1/book/?page=1&page_size=2")
+            page2 = self.client.get("/api/v1/book/?page=2&page_size=2")
+
+        self.assertEqual(page1.status_code, status.HTTP_200_OK)
+        self.assertEqual(page2.status_code, status.HTTP_200_OK)
+        unordered_warnings = [
+            w for w in caught if "UnorderedObjectListWarning" in w.category.__name__
+        ]
+        self.assertEqual(unordered_warnings, [])
+
+        ids_returned = [item["id"] for item in page1.data["results"]] + [
+            item["id"] for item in page2.data["results"]
+        ]
+        self.assertEqual(ids_returned, [self.b2.id, self.b1.id, self.b3.id, self.b4.id])

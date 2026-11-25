@@ -175,9 +175,11 @@ class ItemViewSet(viewsets.ModelViewSet):
                                 'location', '-location'
                         ]
                         if ordering in valid_orderings:
-                                qs = qs.order_by(ordering)
+                                qs = qs.order_by(ordering, 'id')
+                        else:
+                                qs = qs.order_by('-created_at', '-id')
                 else:
-                        qs = qs.order_by('-created_at')
+                        qs = qs.order_by('-created_at', '-id')
 
                 return qs.distinct()
 
@@ -446,7 +448,7 @@ class BookViewSet(viewsets.ModelViewSet):
         Controlador para gestionar los libros (catálogo).
         Permite lectura a lectores y gestión completa al bibliotecario.
         """
-        queryset = Book.objects.filter(deleted_at__isnull=True).select_related('editorial').prefetch_related('authors', 'genres')
+        queryset = Book.objects.filter(deleted_at__isnull=True).select_related('editorial').prefetch_related('authors', 'genres').order_by('title', 'id')
         serializer_class = BookWriteSerializer
         permission_classes = [IsLibrarianOrPublicReadOnly]
         pagination_class = BookPagination
@@ -497,7 +499,7 @@ class BookViewSet(viewsets.ModelViewSet):
                         qs = qs.filter(items__status=Item.Status.AVAILABLE)
 
                 # distinct() evita libros duplicados cuando hay múltiples autores/géneros
-                return qs.distinct()
+                return qs.order_by('title', 'id').distinct()
 
         def get_serializer_class(self):
                 if self.action == 'list':
@@ -587,7 +589,7 @@ class BookViewSet(viewsets.ModelViewSet):
                                 Q(author_full_name__icontains=search)
                         ).distinct()
 
-                qs = qs.only('id', 'title', 'isbn').order_by('title')[:50]
+                qs = qs.only('id', 'title', 'isbn').order_by('title', 'id')[:50]
                 serializer = BookOptionSerializer(qs, many=True)
                 return Response(serializer.data)
 
@@ -675,7 +677,7 @@ class AuthorViewSet(viewsets.ModelViewSet):
         Sin paginación por defecto para nutrir selectores de formularios.
         Soporta búsqueda por texto con ?search= o ?q=.
         """
-        queryset = Author.objects.all()
+        queryset = Author.objects.all().order_by('last_name', 'name', 'id')
         serializer_class = AuthorSerializer
         permission_classes = [IsLibrarianOrPublicReadOnly]
 
@@ -695,7 +697,7 @@ class AuthorViewSet(viewsets.ModelViewSet):
                                 Q(last_name__icontains=search) |
                                 Q(full_name__icontains=search)
                         )
-                return qs
+                return qs.order_by('last_name', 'name', 'id')
 
 
 class GenreViewSet(viewsets.ModelViewSet):
@@ -705,7 +707,7 @@ class GenreViewSet(viewsets.ModelViewSet):
         Sin paginación por defecto para nutrir checkboxes y selectores de formularios.
         Soporta búsqueda por texto con ?search= o ?q=.
         """
-        queryset = Genre.objects.all()
+        queryset = Genre.objects.all().order_by('name', 'id')
         serializer_class = GenreSerializer
         permission_classes = [IsLibrarianOrPublicReadOnly]
 
@@ -715,7 +717,7 @@ class GenreViewSet(viewsets.ModelViewSet):
                 if search:
                         search = search.strip()
                         qs = qs.filter(name__icontains=search)
-                return qs
+                return qs.order_by('name', 'id')
 
 
 class EditorialViewSet(viewsets.ModelViewSet):
@@ -725,12 +727,12 @@ class EditorialViewSet(viewsets.ModelViewSet):
         Sin paginación por defecto para nutrir selectores de formularios sin recorrer libros.
         Soporta búsqueda por texto con ?search= o ?q=.
         """
-        queryset = Editorial.objects.all().order_by('name')
+        queryset = Editorial.objects.all().order_by('name', 'id')
         serializer_class = EditorialSerializer
         permission_classes = [IsLibrarianOrPublicReadOnly]
 
         def get_queryset(self):
-                qs = Editorial.objects.all().order_by('name')
+                qs = Editorial.objects.all().order_by('name', 'id')
                 search = self.request.query_params.get('search') or self.request.query_params.get('q')
                 if search:
                         search = search.strip()
@@ -749,7 +751,7 @@ class FavoriteViewSet(viewsets.ModelViewSet):
                 # Filtra por el usuario logueado y optimiza la carga de relaciones
                 return User.favorites.through.objects.filter(
                         user=self.request.user
-                ).select_related('user', 'book__editorial')
+                ).select_related('user', 'book__editorial').order_by('book__title', 'id')
 
         def create(self, request, *args, **kwargs):
                 serializer = self.get_serializer(data=request.data)
@@ -819,7 +821,7 @@ class UserViewSet(viewsets.ModelViewSet):
         Controlador para que los bibliotecarios y administradores gestionen
         los usuarios del sistema (búsqueda por DNI para préstamos en mostrador y alta de lectores).
         """
-        queryset = User.objects.filter(deleted_at__isnull=True).order_by('-date_joined')
+        queryset = User.objects.filter(deleted_at__isnull=True).order_by('-date_joined', '-id')
         serializer_class = UserSerializer
         permission_classes = [IsLibrarianOrAdminUser]
 
@@ -847,7 +849,7 @@ class UserViewSet(viewsets.ModelViewSet):
                                 Q(email__icontains=search)
                         )
 
-                return qs.order_by('-date_joined')
+                return qs.order_by('-date_joined', '-id')
 
         @action(detail=False, methods=['get'], url_path=r'by-dni/(?P<dni>\d+)')
         def by_dni(self, request, dni=None):
@@ -1198,7 +1200,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
         permission_classes = [permissions.IsAuthenticated]
 
         def get_queryset(self):
-                queryset = Review.objects.filter(deleted_at__isnull=True).select_related('book__editorial', 'user')
+                queryset = Review.objects.filter(deleted_at__isnull=True).select_related('book__editorial', 'user').order_by('-created_at', '-id')
                 user = self.request.user
                 is_moderator = is_librarian_or_admin(user)
 
