@@ -38,6 +38,37 @@ from .permissions import (
 
 # Create your views here.
 
+PG_INT_MIN = 1
+PG_INT_MAX = 2_147_483_647
+
+
+def parse_pg_int(raw_value, field_name, min_value=PG_INT_MIN, max_value=PG_INT_MAX):
+        """Parsea un entero dentro del rango int32 de PostgreSQL o lanza 400."""
+        value_str = str(raw_value).strip() if raw_value is not None else ''
+        if not re.fullmatch(r'[+-]?\d+', value_str):
+                raise ValidationError({
+                        field_name: f"El parámetro '{field_name}' debe ser un número entero válido."
+                })
+        parsed = int(value_str)
+        if parsed < min_value or parsed > max_value:
+                raise ValidationError({
+                        field_name: f"El parámetro '{field_name}' debe estar entre {min_value} y {max_value}."
+                })
+        return parsed
+
+
+def try_parse_pg_int(raw_value, min_value=PG_INT_MIN, max_value=PG_INT_MAX):
+        """Retorna el int32 válido si raw_value representa dígitos en rango; si no, None."""
+        if not raw_value:
+                return None
+        value_str = str(raw_value).strip()
+        if not value_str.isdigit() or len(value_str) > 10:
+                return None
+        parsed = int(value_str)
+        if min_value <= parsed <= max_value:
+                return parsed
+        return None
+
 # Usen clases para declarar las views. Un ejemplo hecho con la IA:
 
 '''
@@ -113,7 +144,7 @@ class ItemViewSet(viewsets.ModelViewSet):
                 book_param = self.request.query_params.get('book')
 
                 if book_param:
-                        qs = qs.filter(book_id=book_param)
+                        qs = qs.filter(book_id=parse_pg_int(book_param, 'book'))
 
                 if status_param:
                         qs = qs.filter(status=status_param)
@@ -306,10 +337,9 @@ class LoanViewSet(viewsets.ModelViewSet):
                                 | Q(user__email__icontains=user_search)
                                 | Q(user_full_name__icontains=user_search)
                         )
-                        if user_search.isdigit() and len(user_search) <= 10:
-                                user_id = int(user_search)
-                                if user_id <= 2_147_483_647:
-                                        user_query |= Q(user_id=user_id)
+                        user_id = try_parse_pg_int(user_search)
+                        if user_id is not None:
+                                user_query |= Q(user_id=user_id)
                         qs = qs.annotate(
                                 user_full_name=Concat(
                                         F('user__first_name'),
@@ -323,8 +353,9 @@ class LoanViewSet(viewsets.ModelViewSet):
                                 Q(item__inventory_code__icontains=item_search)
                                 | Q(item__book__title__icontains=item_search)
                         )
-                        if item_search.isdigit():
-                                item_query |= Q(item_id=int(item_search))
+                        item_id = try_parse_pg_int(item_search)
+                        if item_id is not None:
+                                item_query |= Q(item_id=item_id)
                         qs = qs.filter(item_query)
 
                 valid_statuses = {'active', 'overdue', 'returned'}
@@ -444,7 +475,7 @@ class BookViewSet(viewsets.ModelViewSet):
                 if genre:
                         qs = qs.filter(genres__name__icontains=genre)
                 if year:
-                        qs = qs.filter(publication_year=year)
+                        qs = qs.filter(publication_year=parse_pg_int(year, 'year'))
                 if search:
                         search = search.strip()
                         qs = qs.annotate(
@@ -801,10 +832,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 rol = self.request.query_params.get('rol')
 
                 if dni:
-                        try:
-                                qs = qs.filter(dni=int(dni))
-                        except (ValueError, TypeError):
-                                return qs.none()
+                        qs = qs.filter(dni=parse_pg_int(dni, 'dni'))
 
                 if rol:
                         qs = qs.filter(rol=rol)
@@ -823,11 +851,12 @@ class UserViewSet(viewsets.ModelViewSet):
 
         @action(detail=False, methods=['get'], url_path=r'by-dni/(?P<dni>\d+)')
         def by_dni(self, request, dni=None):
+                dni_int = parse_pg_int(dni, 'dni')
                 try:
                         qs = User.objects.filter(deleted_at__isnull=True)
                         if not is_admin(request.user):
                                 qs = qs.exclude(Q(rol=User.Rol.ADMIN) | Q(is_superuser=True))
-                        user = qs.get(dni=int(dni))
+                        user = qs.get(dni=dni_int)
                         serializer = UserSerializer(user, context={'request': request})
                         active_loans_count = Loan.objects.filter(user=user, returned_at__isnull=True).count()
                         data = serializer.data
@@ -912,8 +941,9 @@ class ReservationViewSet(viewsets.ModelViewSet):
                                 | Q(user__email__icontains=user_search)
                                 | Q(user_full_name__icontains=user_search)
                         )
-                        if user_search.isdigit():
-                                user_query |= Q(user_id=int(user_search))
+                        user_id = try_parse_pg_int(user_search)
+                        if user_id is not None:
+                                user_query |= Q(user_id=user_id)
                         queryset = queryset.annotate(
                                 user_full_name=Concat(
                                         F('user__first_name'),
@@ -927,10 +957,9 @@ class ReservationViewSet(viewsets.ModelViewSet):
                                 Q(book__title__icontains=book_search)
                                 | Q(book__isbn__icontains=book_search)
                         )
-                        if book_search.isdigit() and len(book_search) <= 10:
-                                book_id = int(book_search)
-                                if book_id <= 2_147_483_647:
-                                        book_query |= Q(book_id=book_id)
+                        book_id = try_parse_pg_int(book_search)
+                        if book_id is not None:
+                                book_query |= Q(book_id=book_id)
                         queryset = queryset.filter(book_query)
 
                 valid_statuses = {'pending', 'expired', 'completed', 'cancelled'}
@@ -1185,10 +1214,8 @@ class ReviewViewSet(viewsets.ModelViewSet):
 
                 # Si se filtra por libro, mostrar todas las reseñas comunitarias de ese libro
                 book_id = self.request.query_params.get('book')
-                if book_id is not None:
-                        if book_id.isdigit():
-                                return queryset.filter(book_id=int(book_id))
-                        return Review.objects.none()
+                if book_id is not None and book_id != '':
+                        return queryset.filter(book_id=parse_pg_int(book_id, 'book'))
 
                 # Sin filtro de libro: muestra las reseñas del propio usuario autenticado ("Mis reseñas")
                 return queryset.filter(user=user)

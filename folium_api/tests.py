@@ -2209,3 +2209,59 @@ class ItemStateMachineTests(APITestCase):
         )
         del_free = self.client.delete(f"/api/v1/items/{free_item.id}/")
         self.assertEqual(del_free.status_code, status.HTTP_204_NO_CONTENT)
+
+
+class IntegerQueryParamValidationTests(APITestCase):
+    def setUp(self):
+        self.librarian = User.objects.create_user(
+            username="pgint-librarian",
+            dni=91700001,
+            email="pgint-librarian@example.com",
+            password="StrongPassword-123!",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.editorial = Editorial.objects.create(name="PgInt Editorial")
+        self.book = Book.objects.create(
+            title="PgInt Libro",
+            isbn="9788420412146",
+            publication_year=2020,
+            editorial=self.editorial,
+        )
+        self.item = Item.objects.create(
+            book=self.book,
+            inventory_code="9788420412146",
+            status=Item.Status.AVAILABLE,
+        )
+
+    def test_invalid_and_overflow_numeric_filters_return_400_not_500(self):
+        for bad_year in ("abc", "0", "-10", "99999999999999"):
+            res = self.client.get(f"/api/v1/book/?year={bad_year}")
+            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.client.force_authenticate(user=self.librarian)
+        for bad_book in ("abc", "0", "99999999999999"):
+            items_res = self.client.get(f"/api/v1/items/?book={bad_book}")
+            self.assertEqual(items_res.status_code, status.HTTP_400_BAD_REQUEST)
+
+            reviews_res = self.client.get(f"/api/v1/reviews/?book={bad_book}")
+            self.assertEqual(reviews_res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        for bad_dni in ("abc", "0", "99999999999999"):
+            users_res = self.client.get(f"/api/v1/user/?dni={bad_dni}")
+            self.assertEqual(users_res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        by_dni_overflow = self.client.get("/api/v1/user/by-dni/99999999999999/")
+        self.assertEqual(by_dni_overflow.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Mixed text/ID filters ignore out-of-range numeric IDs and still search text fields
+        loan_item_search = self.client.get("/api/v1/loan/?item=9788420412146")
+        self.assertEqual(loan_item_search.status_code, status.HTTP_200_OK)
+
+        loan_user_search = self.client.get("/api/v1/loan/?user=99999999999999")
+        self.assertEqual(loan_user_search.status_code, status.HTTP_200_OK)
+
+        res_user_search = self.client.get("/api/v1/reservations/?user=99999999999999")
+        self.assertEqual(res_user_search.status_code, status.HTTP_200_OK)
+
+        res_book_search = self.client.get("/api/v1/reservations/?book=9788420412146")
+        self.assertEqual(res_book_search.status_code, status.HTTP_200_OK)
