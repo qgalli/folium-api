@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from django.db.models import Avg
+from django.db.models import Avg, Q
 from .models import * # Importamos todos los modelos del archivo `models.py` (que está en este mismo directorio)
 from .permissions import is_admin
 
@@ -472,6 +472,57 @@ class ItemSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def validate(self, attrs):
+        book = attrs.get("book", getattr(self.instance, "book", None))
+        if book is not None and book.deleted_at is not None:
+            raise serializers.ValidationError({
+                "book": "No se puede asignar un ejemplar a un libro eliminado."
+            })
+
+        new_status = attrs.get("status")
+        if self.instance is None:
+            if new_status in (Item.Status.LOANED, Item.Status.RESERVED):
+                raise serializers.ValidationError({
+                    "status": f"No se puede crear un ejemplar directamente en estado '{new_status}'."
+                })
+            return attrs
+
+        old_status = self.instance.status
+        target_status = new_status if new_status is not None else old_status
+        if target_status == old_status:
+            return attrs
+
+        if target_status in (Item.Status.LOANED, Item.Status.RESERVED):
+            raise serializers.ValidationError({
+                "status": f"El estado '{target_status}' solo puede gestionarse desde préstamos o reservas."
+            })
+
+        if (
+            old_status in (Item.Status.DAMAGED, Item.Status.LOST)
+            and target_status == Item.Status.AVAILABLE
+        ):
+            raise serializers.ValidationError({
+                "status": "Un ejemplar dañado o perdido solo puede volver a estar disponible mediante la acción de revisión (mark-reviewed)."
+            })
+
+        if self.instance.loans.filter(returned_at__isnull=True).exists():
+            raise serializers.ValidationError({
+                "status": "No se puede cambiar el estado de un ejemplar con un préstamo activo sin devolver."
+            })
+
+        if (
+            self.instance.reservations.filter(
+                status=Reservation.StatusReservation.PENDING,
+            )
+            .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+            .exists()
+        ):
+            raise serializers.ValidationError({
+                "status": "No se puede cambiar el estado de un ejemplar con una reserva pendiente vigente."
+            })
+
+        return attrs
 
 
 class ItemSummarySerializer(serializers.ModelSerializer):

@@ -2064,3 +2064,148 @@ class BookOptionsHttpHandlerTests(APITestCase):
 
         book_options_res = self.client.get(reverse("folium_api:book-options"))
         self.assertEqual(book_options_res.status_code, status.HTTP_200_OK)
+
+
+class ItemStateMachineTests(APITestCase):
+    def setUp(self):
+        self.librarian = User.objects.create_user(
+            username="fsm-librarian",
+            dni=91600001,
+            email="fsm-librarian@example.com",
+            password="StrongPassword-123!",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.reader = User.objects.create_user(
+            username="fsm-reader",
+            dni=91600002,
+            email="fsm-reader@example.com",
+            password="StrongPassword-123!",
+            rol=User.Rol.USER,
+        )
+        self.editorial = Editorial.objects.create(name="FSM Editorial")
+        self.book = Book.objects.create(title="FSM Libro", editorial=self.editorial)
+        self.deleted_book = Book.objects.create(
+            title="FSM Eliminado",
+            editorial=self.editorial,
+            deleted_at=timezone.now(),
+        )
+        self.client.force_authenticate(user=self.librarian)
+
+    def test_item_fsm_blocks_invalid_transitions_and_allows_mark_reviewed(self):
+        deleted_book_res = self.client.post(
+            "/api/v1/items/",
+            {"book": self.deleted_book.id, "inventory_code": "FSM-DEL-1"},
+            format="json",
+        )
+        self.assertEqual(deleted_book_res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        for blocked_status in (Item.Status.LOANED, Item.Status.RESERVED):
+            create_blocked = self.client.post(
+                "/api/v1/items/",
+                {
+                    "book": self.book.id,
+                    "inventory_code": f"FSM-{blocked_status}",
+                    "status": blocked_status,
+                },
+                format="json",
+            )
+            self.assertEqual(create_blocked.status_code, status.HTTP_400_BAD_REQUEST)
+
+        created_res = self.client.post(
+            "/api/v1/items/",
+            {"book": self.book.id, "inventory_code": "FSM-OK-1", "location": "A1"},
+            format="json",
+        )
+        self.assertEqual(created_res.status_code, status.HTTP_201_CREATED)
+        item_id = created_res.data["id"]
+
+        to_damaged = self.client.patch(
+            f"/api/v1/items/{item_id}/",
+            {"status": Item.Status.DAMAGED},
+            format="json",
+        )
+        self.assertEqual(to_damaged.status_code, status.HTTP_200_OK)
+
+        direct_rehabilitate = self.client.patch(
+            f"/api/v1/items/{item_id}/",
+            {"status": Item.Status.AVAILABLE},
+            format="json",
+        )
+        self.assertEqual(direct_rehabilitate.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.client.force_authenticate(user=self.reader)
+        reader_review = self.client.post(f"/api/v1/items/{item_id}/mark-reviewed/")
+        self.assertEqual(reader_review.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.librarian)
+        lib_review = self.client.post(f"/api/v1/items/{item_id}/mark-reviewed/")
+        self.assertEqual(lib_review.status_code, status.HTTP_200_OK)
+        self.assertEqual(lib_review.data["status"], Item.Status.AVAILABLE)
+
+        repeat_review = self.client.post(f"/api/v1/items/{item_id}/mark-reviewed/")
+        self.assertEqual(repeat_review.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_item_blocks_status_change_and_delete_when_loaned_or_reserved(self):
+        loaned_item = Item.objects.create(
+            book=self.book,
+            inventory_code="FSM-LOAN-1",
+            status=Item.Status.LOANED,
+            location="Estante 1",
+        )
+        loan = Loan.objects.create(
+            item=loaned_item,
+            user=self.reader,
+            loaned_at=timezone.now() - timedelta(days=1),
+            due_at=timezone.now() + timedelta(days=7),
+        )
+
+        # Updating location without changing status stays allowed
+        patch_location = self.client.patch(
+            f"/api/v1/items/{loaned_item.id}/",
+            {"status": Item.Status.LOANED, "location": "Estante 2"},
+            format="json",
+        )
+        self.assertEqual(patch_location.status_code, status.HTTP_200_OK)
+
+        patch_status = self.client.patch(
+            f"/api/v1/items/{loaned_item.id}/",
+            {"status": Item.Status.DAMAGED},
+            format="json",
+        )
+        self.assertEqual(patch_status.status_code, status.HTTP_400_BAD_REQUEST)
+
+        del_loaned = self.client.delete(f"/api/v1/items/{loaned_item.id}/")
+        self.assertEqual(del_loaned.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Loan.objects.filter(pk=loan.pk).exists())
+
+        reserved_item = Item.objects.create(
+            book=self.book,
+            inventory_code="FSM-RES-1",
+            status=Item.Status.RESERVED,
+        )
+        reservation = Reservation.objects.create(
+            book=self.book,
+            item=reserved_item,
+            user=self.reader,
+            status=Reservation.StatusReservation.PENDING,
+            expires_at=timezone.now() + timedelta(days=2),
+        )
+
+        patch_reserved = self.client.patch(
+            f"/api/v1/items/{reserved_item.id}/",
+            {"status": Item.Status.DAMAGED},
+            format="json",
+        )
+        self.assertEqual(patch_reserved.status_code, status.HTTP_400_BAD_REQUEST)
+
+        del_reserved = self.client.delete(f"/api/v1/items/{reserved_item.id}/")
+        self.assertEqual(del_reserved.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Reservation.objects.filter(pk=reservation.pk).exists())
+
+        free_item = Item.objects.create(
+            book=self.book,
+            inventory_code="FSM-FREE-1",
+            status=Item.Status.AVAILABLE,
+        )
+        del_free = self.client.delete(f"/api/v1/items/{free_item.id}/")
+        self.assertEqual(del_free.status_code, status.HTTP_204_NO_CONTENT)

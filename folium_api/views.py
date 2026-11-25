@@ -155,6 +155,75 @@ class ItemViewSet(viewsets.ModelViewSet):
                         return ItemReadSerializer
                 return ItemSerializer
 
+        def perform_destroy(self, instance):
+                if (
+                        instance.status == Item.Status.LOANED
+                        or Loan.objects.filter(item=instance, returned_at__isnull=True).exists()
+                ):
+                        raise ValidationError(
+                                "No se puede eliminar el ejemplar porque tiene un préstamo activo sin devolver."
+                        )
+
+                has_active_reservation = (
+                        Reservation.objects.filter(
+                                item=instance,
+                                status=Reservation.StatusReservation.PENDING,
+                        )
+                        .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+                        .exists()
+                )
+                if has_active_reservation:
+                        raise ValidationError(
+                                "No se puede eliminar el ejemplar porque tiene una reserva pendiente vigente."
+                        )
+
+                instance.delete()
+
+        @action(
+                detail=True,
+                methods=['post'],
+                permission_classes=[IsLibrarianOrAdminUser],
+                url_path='mark-reviewed',
+                url_name='mark-reviewed',
+        )
+        def mark_reviewed(self, request, pk=None):
+                """Rehabilita a AVAILABLE un ejemplar DAMAGED o LOST tras revisión física."""
+                target = self.get_object()
+                with transaction.atomic():
+                        item = Item.objects.select_for_update().select_related('book').get(pk=target.pk)
+
+                        if item.status not in (Item.Status.DAMAGED, Item.Status.LOST):
+                                raise ValidationError({
+                                        "status": "Solo se pueden rehabilitar ejemplares en estado Dañado o Perdido."
+                                })
+
+                        if item.book.deleted_at is not None:
+                                raise ValidationError({
+                                        "book": "No se puede rehabilitar un ejemplar cuyo libro fue eliminado."
+                                })
+
+                        if item.loans.filter(returned_at__isnull=True).exists():
+                                raise ValidationError({
+                                        "status": "El ejemplar tiene un préstamo activo sin devolver."
+                                })
+
+                        has_active_reservation = (
+                                item.reservations.filter(status=Reservation.StatusReservation.PENDING)
+                                .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+                                .exists()
+                        )
+                        if has_active_reservation:
+                                raise ValidationError({
+                                        "status": "El ejemplar tiene una reserva pendiente vigente."
+                                })
+
+                        item.status = Item.Status.AVAILABLE
+                        item.save(update_fields=['status', 'updated_at'])
+
+                refreshed = self.get_queryset().get(pk=item.pk)
+                serializer = ItemReadSerializer(refreshed, context=self.get_serializer_context())
+                return Response(serializer.data, status=status.HTTP_200_OK)
+
 class LoanPagination(pagination.PageNumberPagination):
         page_size = 20
         page_size_query_param = 'page_size'
