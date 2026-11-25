@@ -161,7 +161,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 
 # ─── Internacionalización ─────────────────────────────────────────────────────
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'es-ar'
 
 TIME_ZONE = 'UTC'
 
