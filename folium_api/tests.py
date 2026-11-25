@@ -2,7 +2,7 @@ from datetime import datetime, time, timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -1615,6 +1615,7 @@ class BillingMercadoPagoTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("plan_code", response.data)
 
+    @override_settings(DEBUG=True)
     def test_checkout_preference_valid_payload(self):
         url = reverse("folium_api:billing-checkout")
         payload = {
@@ -1630,6 +1631,7 @@ class BillingMercadoPagoTests(APITestCase):
         self.assertIn("preference_id", response.data["checkout"])
         self.assertIn("init_point", response.data["checkout"])
 
+    @override_settings(DEBUG=True)
     def test_checkout_creates_pending_subscription(self):
         url = reverse("folium_api:billing-checkout")
         response = self.client.post(
@@ -1657,6 +1659,7 @@ class BillingMercadoPagoTests(APITestCase):
             response.data["checkout"]["preference_id"],
         )
 
+    @override_settings(DEBUG=True)
     @patch(
         "folium_api.mercadopago_service.MercadoPagoService.fetch_payment_details",
         return_value={
@@ -1716,6 +1719,152 @@ class BillingMercadoPagoTests(APITestCase):
             PaymentTransaction.objects.filter(mp_payment_id="PAYMENT-123").count(),
             1,
         )
+
+    @override_settings(DEBUG=False)
+    def test_production_blocks_unconfigured_checkout_and_payment_verification(self):
+        with patch.dict("os.environ", {"MP_ACCESS_TOKEN": ""}, clear=False):
+            checkout_res = self.client.post(
+                reverse("folium_api:billing-checkout"),
+                {
+                    "plan_code": "BASIC",
+                    "billing_cycle": "MONTHLY",
+                    "organization_name": "Biblioteca Prod",
+                    "payer_email": "prod@biblioteca.org",
+                },
+                format="json",
+            )
+            self.assertEqual(checkout_res.status_code, status.HTTP_502_BAD_GATEWAY)
+
+            verify_res = self.client.get(
+                reverse("folium_api:billing-payment-status"),
+                {"payment_id": "SIM-FAKE-123", "payment_status": "approved"},
+            )
+            self.assertEqual(verify_res.status_code, status.HTTP_502_BAD_GATEWAY)
+
+    @override_settings(DEBUG=False)
+    def test_production_webhook_requires_hmac_and_validates_simulated_currency_and_amount(self):
+        import hashlib
+        import hmac
+        import time
+
+        plan = SubscriptionPlan.objects.create(
+            code="BASIC",
+            name="Folium Gestión",
+            monthly_price="247000.00",
+            annual_monthly_equivalent="205800.00",
+        )
+        subscription = LibrarySubscription.objects.create(
+            plan=plan,
+            organization_name="Biblioteca HMAC",
+            payer_email="hmac@biblioteca.org",
+            external_reference="FOLIUM-BASIC-MONTHLY-HMAC",
+            billing_cycle=LibrarySubscription.BillingCycle.MONTHLY,
+        )
+        url = reverse("folium_api:billing-mp-webhook")
+
+        # 1. Unsigned webhook rejected in production (DEBUG=False)
+        with patch.dict("os.environ", {"MP_WEBHOOK_SECRET": ""}, clear=False):
+            unsigned_res = self.client.post(
+                url,
+                {"type": "payment", "data": {"id": "PAY-UNAUTH"}},
+                format="json",
+            )
+            self.assertEqual(unsigned_res.status_code, status.HTTP_401_UNAUTHORIZED)
+            self.assertFalse(WebhookEventLog.objects.latest("id").signature_valid)
+
+        secret = "test-webhook-secret-key"
+        def signed_headers(data_id, req_id="req-1"):
+            ts = str(int(time.time()))
+            manifest = f"id:{str(data_id).lower()};request-id:{req_id};ts:{ts};"
+            v1 = hmac.new(secret.encode("utf-8"), manifest.encode("utf-8"), hashlib.sha256).hexdigest()
+            return {"HTTP_X_REQUEST_ID": req_id, "HTTP_X_SIGNATURE": f"ts={ts},v1={v1}"}
+
+        with patch.dict("os.environ", {"MP_WEBHOOK_SECRET": secret}, clear=False):
+            # 2. Simulated payment rejected with 400
+            with patch(
+                "folium_api.mercadopago_service.MercadoPagoService.fetch_payment_details",
+                return_value={
+                    "id": "SIM-1",
+                    "external_reference": subscription.external_reference,
+                    "status": "approved",
+                    "currency_id": "ARS",
+                    "transaction_amount": 247000,
+                    "simulated": True,
+                },
+            ):
+                sim_res = self.client.post(
+                    url,
+                    {"type": "payment", "data": {"id": "SIM-1"}},
+                    format="json",
+                    **signed_headers("SIM-1", "req-sim"),
+                )
+                self.assertEqual(sim_res.status_code, status.HTTP_400_BAD_REQUEST)
+                subscription.refresh_from_db()
+                self.assertEqual(subscription.status, LibrarySubscription.Status.PENDING)
+
+            # 3. Underpaid payment rejected with 400 and does not activate
+            with patch(
+                "folium_api.mercadopago_service.MercadoPagoService.fetch_payment_details",
+                return_value={
+                    "id": "PAY-UNDER",
+                    "external_reference": subscription.external_reference,
+                    "status": "approved",
+                    "currency_id": "ARS",
+                    "transaction_amount": 1.00,
+                },
+            ):
+                under_res = self.client.post(
+                    url,
+                    {"type": "payment", "data": {"id": "PAY-UNDER"}},
+                    format="json",
+                    **signed_headers("PAY-UNDER", "req-under"),
+                )
+                self.assertEqual(under_res.status_code, status.HTTP_400_BAD_REQUEST)
+                subscription.refresh_from_db()
+                self.assertEqual(subscription.status, LibrarySubscription.Status.PENDING)
+
+            # 4. Wrong currency rejected with 400 and does not activate
+            with patch(
+                "folium_api.mercadopago_service.MercadoPagoService.fetch_payment_details",
+                return_value={
+                    "id": "PAY-USD",
+                    "external_reference": subscription.external_reference,
+                    "status": "approved",
+                    "currency_id": "USD",
+                    "transaction_amount": 247000,
+                },
+            ):
+                usd_res = self.client.post(
+                    url,
+                    {"type": "payment", "data": {"id": "PAY-USD"}},
+                    format="json",
+                    **signed_headers("PAY-USD", "req-usd"),
+                )
+                self.assertEqual(usd_res.status_code, status.HTTP_400_BAD_REQUEST)
+                subscription.refresh_from_db()
+                self.assertEqual(subscription.status, LibrarySubscription.Status.PENDING)
+
+            # 5. Valid signed, exact amount & currency activates subscription
+            with patch(
+                "folium_api.mercadopago_service.MercadoPagoService.fetch_payment_details",
+                return_value={
+                    "id": "PAY-OK",
+                    "external_reference": subscription.external_reference,
+                    "status": "approved",
+                    "currency_id": "ARS",
+                    "transaction_amount": 247000,
+                    "payer": {"email": "hmac@biblioteca.org"},
+                },
+            ):
+                ok_res = self.client.post(
+                    url,
+                    {"type": "payment", "data": {"id": "PAY-OK"}},
+                    format="json",
+                    **signed_headers("PAY-OK", "req-ok"),
+                )
+                self.assertEqual(ok_res.status_code, status.HTTP_200_OK)
+                subscription.refresh_from_db()
+                self.assertEqual(subscription.status, LibrarySubscription.Status.ACTIVE)
 
 
 class UserPrivilegeEscalationTests(APITestCase):
@@ -2012,11 +2161,19 @@ class TrailingSlashPostRoutesTests(APITestCase):
 
         webhook_res = self.client.post(
             "/api/v1/billing/webhook/mercadopago",
-            {"type": "payment", "data": {"id": "999999"}},
+            {"type": "merchant_order", "data": {"id": "999999"}},
             format="json",
         )
         self.assertNotEqual(webhook_res.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
-        self.assertEqual(webhook_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(webhook_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        with override_settings(DEBUG=True):
+            dev_webhook_res = self.client.post(
+                "/api/v1/billing/webhook/mercadopago",
+                {"type": "merchant_order", "data": {"id": "999999"}},
+                format="json",
+            )
+            self.assertEqual(dev_webhook_res.status_code, status.HTTP_200_OK)
 
 
 class FavoriteBehaviorTests(APITestCase):

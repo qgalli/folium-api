@@ -9,6 +9,8 @@ import urllib.request
 import uuid
 from decimal import Decimal
 
+from django.conf import settings
+
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
@@ -407,6 +409,7 @@ class MercadoPagoService:
             }
 
         # Modo Simulación / Desarrollo Local (cuando aún no se cargó MP_ACCESS_TOKEN en .env)
+        self._ensure_simulation_allowed()
         simulated_pref_id = f"SANDBOX-PREF-{uuid.uuid4().hex[:14].upper()}"
         return {
             "mode": "LOCAL_SIMULATION",
@@ -487,6 +490,7 @@ class MercadoPagoService:
                 "currency_id": plan["currency_id"],
             }
 
+        self._ensure_simulation_allowed()
         simulated_sub_id = f"SANDBOX-SUB-{uuid.uuid4().hex[:12].upper()}"
         return {
             "mode": "LOCAL_SIMULATION",
@@ -500,12 +504,19 @@ class MercadoPagoService:
             "currency_id": plan["currency_id"],
         }
 
+    def _ensure_simulation_allowed(self) -> None:
+        if not settings.DEBUG:
+            raise MercadoPagoServiceError(
+                "La pasarela MercadoPago no está configurada en el servidor (falta MP_ACCESS_TOKEN)."
+            )
+
     def fetch_payment_details(self, payment_id: str) -> dict:
         """
         Consulta directamente en los servidores de MercadoPago el estado real de un pago.
         NUNCA se debe dar por válido un pago únicamente por los parámetros GET de retorno.
         """
         if not self.is_configured:
+            self._ensure_simulation_allowed()
             return {
                 "id": payment_id,
                 "status": "approved",

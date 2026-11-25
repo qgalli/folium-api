@@ -1,6 +1,7 @@
 import logging
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -21,6 +22,18 @@ from .mercadopago_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_expected_subscription_amount(subscription: LibrarySubscription) -> Decimal:
+    """Devuelve el monto esperado del plan respetando annual_total_price del catálogo."""
+    catalog_plan = LIBRARY_PLANS_CATALOG.get(subscription.plan.code)
+    if (
+        subscription.billing_cycle == LibrarySubscription.BillingCycle.ANNUAL
+        and catalog_plan is not None
+        and subscription.plan.annual_monthly_equivalent == catalog_plan["annual_monthly_equivalent"]
+    ):
+        return Decimal(str(catalog_plan["annual_total_price"])).quantize(Decimal("0.01"))
+    return subscription.plan.get_Checkout_amount(subscription.billing_cycle)
 
 
 def get_or_sync_subscription_plan(plan_code):
@@ -219,6 +232,11 @@ class VerifyPaymentStatusView(APIView):
         mp_service = MercadoPagoService()
         try:
             payment_info = mp_service.fetch_payment_details(payment_id)
+            if payment_info.get("simulated") and not settings.DEBUG:
+                return Response(
+                    {"detail": "Los pagos simulados no están habilitados fuera de DEBUG."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             real_status = payment_info.get("status", status_param)
 
             return Response(
@@ -277,7 +295,7 @@ class MercadoPagoWebhookView(APIView):
             request_id=x_request_id,
             event_type=event_type,
             data_id=str(data_id),
-            signature_valid=not bool(mp_service.webhook_secret),
+            signature_valid=False,
             raw_headers={
                 "x-request-id": x_request_id,
                 "x-signature": x_signature,
@@ -286,8 +304,8 @@ class MercadoPagoWebhookView(APIView):
             raw_payload=payload,
         )
 
-        # 1. Validar firma criptográfica si MP_WEBHOOK_SECRET está configurado
-        if mp_service.webhook_secret:
+        # 1. Validar firma criptográfica (siempre obligatoria fuera de DEBUG)
+        if mp_service.webhook_secret or not settings.DEBUG:
             try:
                 mp_service.verify_webhook_signature(
                     x_signature=x_signature,
@@ -314,6 +332,14 @@ class MercadoPagoWebhookView(APIView):
         if event_type == "payment" and data_id:
             try:
                 payment_details = mp_service.fetch_payment_details(str(data_id))
+                if payment_details.get("simulated"):
+                    webhook_log.error_message = "Pagos simulados rechazados en webhooks."
+                    webhook_log.save(update_fields=["error_message"])
+                    return Response(
+                        {"detail": "No se permiten pagos simulados en webhooks."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
                 payment_status = payment_details.get("status")
                 ext_ref = (
                     payment_details.get("external_reference")
@@ -323,15 +349,20 @@ class MercadoPagoWebhookView(APIView):
                     or ""
                 )
 
-                subscription = (
-                    LibrarySubscription.objects.filter(external_reference=ext_ref).first()
-                    if ext_ref
-                    else None
-                )
                 amount = Decimal(str(payment_details.get("transaction_amount") or "0"))
+                payment_currency = str(payment_details.get("currency_id") or "").upper()
                 payer = payment_details.get("payer")
 
                 with transaction.atomic():
+                    subscription = (
+                        LibrarySubscription.objects.select_for_update()
+                        .select_related("plan")
+                        .filter(external_reference=ext_ref)
+                        .first()
+                        if ext_ref
+                        else None
+                    )
+
                     PaymentTransaction.objects.update_or_create(
                         mp_payment_id=str(payment_details.get("id") or data_id),
                         defaults={
@@ -340,7 +371,7 @@ class MercadoPagoWebhookView(APIView):
                             "status": payment_status or "pending",
                             "status_detail": payment_details.get("status_detail", ""),
                             "transaction_amount": amount,
-                            "currency_id": payment_details.get("currency_id", "ARS"),
+                            "currency_id": payment_currency or "ARS",
                             "payment_method_id": payment_details.get("payment_method_id", ""),
                             "payment_type_id": payment_details.get("payment_type_id", ""),
                             "payer_email": payer.get("email", "") if isinstance(payer, dict) else "",
@@ -349,6 +380,20 @@ class MercadoPagoWebhookView(APIView):
                     )
 
                     if payment_status == "approved" and subscription:
+                        expected_currency = str(subscription.plan.currency_id or "ARS").upper()
+                        expected_amount = _get_expected_subscription_amount(subscription)
+                        if payment_currency != expected_currency or amount < expected_amount:
+                            mismatch_msg = (
+                                f"Monto o moneda inválida para {ext_ref}: "
+                                f"recibido {amount} {payment_currency}, esperado >= {expected_amount} {expected_currency}."
+                            )
+                            webhook_log.error_message = mismatch_msg
+                            webhook_log.save(update_fields=["error_message"])
+                            logger.warning("Webhook MercadoPago rechazado: %s", mismatch_msg)
+                            return Response(
+                                {"detail": "El monto o la moneda del pago no coincide con el plan."},
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
                         subscription.activate_period()
 
                 webhook_log.processed = True
