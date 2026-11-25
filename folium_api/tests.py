@@ -640,6 +640,21 @@ class CatalogPublicReadOnlyTests(APITestCase):
         response_loans = self.client.get(reverse("folium_api:loan-list"))
         self.assertIn(response_loans.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
+    def test_reader_cannot_read_items_and_librarian_can(self):
+        item = Item.objects.create(book=self.book, inventory_code="PERM-ITEM-1")
+
+        self.client.force_authenticate(user=self.reader)
+        res_list_reader = self.client.get(reverse("folium_api:item-list"))
+        self.assertEqual(res_list_reader.status_code, status.HTTP_403_FORBIDDEN)
+        res_detail_reader = self.client.get(reverse("folium_api:item-detail", args=[item.id]))
+        self.assertEqual(res_detail_reader.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.librarian)
+        res_list_lib = self.client.get(reverse("folium_api:item-list"))
+        self.assertEqual(res_list_lib.status_code, status.HTTP_200_OK)
+        res_detail_lib = self.client.get(reverse("folium_api:item-detail", args=[item.id]))
+        self.assertEqual(res_detail_lib.status_code, status.HTTP_200_OK)
+
 
 class LoanCounterTests(APITestCase):
     def setUp(self):

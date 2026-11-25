@@ -92,7 +92,7 @@ class ItemViewSet(viewsets.ModelViewSet):
                 'book__reservations',
         )
         serializer_class = ItemSerializer
-        permission_classes = [IsLibrarianOrReadOnly]
+        permission_classes = [IsLibrarianOrAdminUser]
         pagination_class = ItemPagination
 
         def get_queryset(self):
