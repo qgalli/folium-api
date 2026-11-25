@@ -25,7 +25,9 @@ urlpatterns = [
 
     # Autenticación JWT
     path('api/v1/token/', FoliumTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/v1/token', FoliumTokenObtainPairView.as_view(), name='token_obtain_pair_no_slash'),
     path('api/v1/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/v1/token/refresh', TokenRefreshView.as_view(), name='token_refresh_no_slash'),
 
     # Rutas públicas directas a nivel raíz
     path('random/', RandomBookView.as_view(), name='root-random'),

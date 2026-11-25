@@ -1981,3 +1981,39 @@ class AuthExceptionHandlerTests(APITestCase):
         self.assertEqual(bad_jwt_res.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(bad_jwt_res.data, {"detail": UNIFORM_AUTH_ERROR_DETAIL})
         self.assertTrue(jwt_logs.output)
+
+
+class TrailingSlashPostRoutesTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="slash-reader",
+            dni=91400001,
+            email="slash-reader@example.com",
+            password="StrongPassword-123!",
+        )
+
+    def test_token_refresh_and_webhook_accept_post_without_trailing_slash(self):
+        token_res = self.client.post(
+            "/api/v1/token",
+            {"username": "slash-reader", "password": "StrongPassword-123!"},
+            format="json",
+        )
+        self.assertEqual(token_res.status_code, status.HTTP_200_OK)
+        self.assertIn("access", token_res.data)
+        self.assertIn("refresh", token_res.data)
+
+        refresh_res = self.client.post(
+            "/api/v1/token/refresh",
+            {"refresh": token_res.data["refresh"]},
+            format="json",
+        )
+        self.assertEqual(refresh_res.status_code, status.HTTP_200_OK)
+        self.assertIn("access", refresh_res.data)
+
+        webhook_res = self.client.post(
+            "/api/v1/billing/webhook/mercadopago",
+            {"type": "payment", "data": {"id": "999999"}},
+            format="json",
+        )
+        self.assertNotEqual(webhook_res.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(webhook_res.status_code, status.HTTP_200_OK)
