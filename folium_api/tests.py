@@ -2265,3 +2265,117 @@ class IntegerQueryParamValidationTests(APITestCase):
 
         res_book_search = self.client.get("/api/v1/reservations/?book=9788420412146")
         self.assertEqual(res_book_search.status_code, status.HTTP_200_OK)
+
+
+class LoanConcurrencyAndIntegrityTests(APITestCase):
+    def setUp(self):
+        self.librarian = User.objects.create_user(
+            username="loan-lock-lib",
+            dni=91800001,
+            email="loan-lock-lib@example.com",
+            password="StrongPassword-123!",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.reader_1 = User.objects.create_user(
+            username="loan-lock-r1",
+            dni=91800002,
+            email="loan-lock-r1@example.com",
+            password="StrongPassword-123!",
+        )
+        self.reader_2 = User.objects.create_user(
+            username="loan-lock-r2",
+            dni=91800003,
+            email="loan-lock-r2@example.com",
+            password="StrongPassword-123!",
+        )
+        self.editorial = Editorial.objects.create(name="LoanLock Editorial")
+        self.book = Book.objects.create(title="LoanLock Libro", editorial=self.editorial)
+        self.item = Item.objects.create(
+            book=self.book,
+            inventory_code="LOCK-001",
+            status=Item.Status.AVAILABLE,
+        )
+        self.client.force_authenticate(user=self.librarian)
+
+    def test_db_partial_unique_constraint_blocks_two_active_loans_same_item(self):
+        from django.db import IntegrityError, transaction
+
+        now = timezone.now()
+        first = Loan.objects.create(
+            item=self.item,
+            user=self.reader_1,
+            loaned_at=now - timedelta(days=2),
+            due_at=now + timedelta(days=5),
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Loan.objects.create(
+                    item=self.item,
+                    user=self.reader_2,
+                    loaned_at=now,
+                    due_at=now + timedelta(days=7),
+                )
+
+        first.returned_at = now - timedelta(hours=1)
+        first.save(update_fields=["returned_at"])
+
+        second = Loan.objects.create(
+            item=self.item,
+            user=self.reader_2,
+            loaned_at=now,
+            due_at=now + timedelta(days=7),
+        )
+        self.assertIsNotNone(second.pk)
+
+    def test_serializer_rechecks_item_under_lock_before_creating_loan(self):
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+        from folium_api.serializers import LoanWriteSerializer
+
+        serializer = LoanWriteSerializer(
+            data={"item": self.item.id, "user": self.reader_2.id}
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        # Simulate concurrent loan committed right after validation passed
+        now = timezone.now()
+        Loan.objects.create(
+            item=self.item,
+            user=self.reader_1,
+            loaned_at=now,
+            due_at=now + timedelta(days=10),
+        )
+        self.item.status = Item.Status.LOANED
+        self.item.save(update_fields=["status"])
+
+        with self.assertRaises(DRFValidationError):
+            serializer.save()
+
+    def test_cannot_reopen_returned_loan_or_overwrite_damaged_item_status(self):
+        create_res = self.client.post(
+            "/api/v1/loan/",
+            {"item": self.item.id, "user": self.reader_1.id},
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        loan_id = create_res.data["id"]
+
+        # Simulate item marked damaged before closing loan record
+        self.item.status = Item.Status.DAMAGED
+        self.item.save(update_fields=["status"])
+
+        return_res = self.client.patch(
+            f"/api/v1/loan/{loan_id}/",
+            {"returned_at": timezone.now().isoformat()},
+            format="json",
+        )
+        self.assertEqual(return_res.status_code, status.HTTP_200_OK)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.status, Item.Status.DAMAGED)
+
+        reopen_res = self.client.patch(
+            f"/api/v1/loan/{loan_id}/",
+            {"returned_at": None},
+            format="json",
+        )
+        self.assertEqual(reopen_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("returned_at", reopen_res.data)

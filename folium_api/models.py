@@ -257,6 +257,13 @@ class Loan(models.Model):
             models.Index(fields=['due_at'], name='loan_due_at_idx'),
             models.Index(fields=['user', 'returned_at'], name='loan_user_ret_idx'),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['item'],
+                condition=models.Q(returned_at__isnull=True),
+                name='uniq_active_loan_per_item',
+            ),
+        ]
 
     def __str__(self):
         return f"Loan #{self.id} - User: {self.user.get_full_name()} - Item: {self.item.inventory_code}"

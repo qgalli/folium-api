@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
@@ -936,6 +936,32 @@ class LoanWriteSerializer(serializers.ModelSerializer):
             "due_at": {"required": False},
         }
 
+    def _assert_item_available_for_loan(self, item, user, instance=None):
+        active_loan = Loan.objects.filter(item=item, returned_at__isnull=True)
+        if instance is not None:
+            active_loan = active_loan.exclude(pk=instance.pk)
+        if active_loan.exists():
+            raise serializers.ValidationError({
+                "item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."
+            })
+
+        is_new_or_different_item = instance is None or instance.item_id != item.id
+        if is_new_or_different_item and item.status != Item.Status.AVAILABLE:
+            has_matching_reservation = (
+                item.status == Item.Status.RESERVED
+                and user is not None
+                and Reservation.objects.filter(
+                    item=item,
+                    user=user,
+                    status=Reservation.StatusReservation.PENDING,
+                    expires_at__gt=timezone.now(),
+                ).exists()
+            )
+            if not has_matching_reservation:
+                raise serializers.ValidationError({
+                    "item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."
+                })
+
     def validate(self, attrs):
         from datetime import timedelta
         # Asignar valores por defecto para préstamos nuevos
@@ -950,6 +976,16 @@ class LoanWriteSerializer(serializers.ModelSerializer):
         item = attrs.get("item", getattr(self.instance, "item", None))
         user = attrs.get("user", getattr(self.instance, "user", None))
 
+        if self.instance is not None and self.instance.returned_at is not None:
+            if "returned_at" in attrs and attrs["returned_at"] is None:
+                raise serializers.ValidationError({
+                    "returned_at": "No se puede reabrir un préstamo ya devuelto."
+                })
+            if item is not None and item.pk != self.instance.item_id:
+                raise serializers.ValidationError({
+                    "item": "No se puede cambiar el ejemplar de un préstamo ya devuelto."
+                })
+
         # 1. Validaciones de fechas
         if due_at and loaned_at and due_at <= loaned_at:
             raise serializers.ValidationError({"due_at": "La fecha de vencimiento debe ser posterior a la fecha de inicio del préstamo."})
@@ -959,63 +995,116 @@ class LoanWriteSerializer(serializers.ModelSerializer):
 
         # 2. Validación de disponibilidad del ejemplar
         if item:
-            # Comprobar si el item ya está en uso o tiene un préstamo activo
-            active_loan = Loan.objects.filter(item=item, returned_at__isnull=True)
-            if self.instance:
-                active_loan = active_loan.exclude(pk=self.instance.pk)
-            
-            is_new_or_different_item = not self.instance or self.instance.item != item
-            has_matching_reservation = (
-                user is not None
-                and Reservation.objects.filter(
-                    item=item,
-                    user=user,
-                    status=Reservation.StatusReservation.PENDING,
-                    expires_at__gt=timezone.now(),
-                ).exists()
-            )
-            if active_loan.exists() or (
-                is_new_or_different_item
-                and item.status != Item.Status.AVAILABLE
-                and not (
-                    item.status == Item.Status.RESERVED
-                    and has_matching_reservation
-                )
-            ):
-                raise serializers.ValidationError({"item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."})
-        
+            if (self.instance is None or item.pk != self.instance.item_id) and item.book.deleted_at is not None:
+                raise serializers.ValidationError({
+                    "item": "No se puede prestar un ejemplar de un libro eliminado."
+                })
+            if returned_at is None:
+                self._assert_item_available_for_loan(item, user, instance=self.instance)
+
         return attrs
 
     def create(self, validated_data):
         with transaction.atomic():
-            loan = super().create(validated_data)
-            item = loan.item
-            item.status = Item.Status.LOANED
-            item.save()
-            reservation = Reservation.objects.filter(
-                item=item,
-                user=loan.user,
+            target_item = validated_data["item"]
+            locked_item = Item.objects.select_for_update().get(pk=target_item.pk)
+            validated_data["item"] = locked_item
+
+            if validated_data.get("returned_at") is None:
+                self._assert_item_available_for_loan(
+                    locked_item,
+                    validated_data.get("user"),
+                    instance=None,
+                )
+
+            reservation = Reservation.objects.select_for_update().filter(
+                item=locked_item,
+                user=validated_data.get("user"),
                 status=Reservation.StatusReservation.PENDING,
+                expires_at__gt=timezone.now(),
             ).first()
+
+            try:
+                loan = super().create(validated_data)
+            except IntegrityError:
+                raise serializers.ValidationError({
+                    "item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."
+                })
+
+            if loan.returned_at is None:
+                locked_item.status = Item.Status.LOANED
+                locked_item.save(update_fields=["status", "updated_at"])
+
             if reservation:
                 reservation.status = Reservation.StatusReservation.COMPLETED
                 reservation.save(update_fields=["status", "updated_at"])
             return loan
 
     def update(self, instance, validated_data):
-        previous_item = instance.item
-        loan = super().update(instance, validated_data)
-        # Si cambiaron el ejemplar físico, liberamos el anterior
-        if previous_item != loan.item:
-            previous_item.status = Item.Status.AVAILABLE
-            previous_item.save()
-        # Si ya tiene fecha de devolución, vuelve a estar DISPONIBLE; si no, queda PRESTADO
-        if loan.returned_at is not None:
-            loan.item.status = Item.Status.AVAILABLE
-        else:
-            loan.item.status = Item.Status.LOANED
-        loan.item.save()
-        return loan
+        with transaction.atomic():
+            locked_loan = Loan.objects.select_for_update().get(pk=instance.pk)
+            was_returned = locked_loan.returned_at is not None
+            candidate_item = validated_data.get("item", locked_loan.item)
+            item_ids = sorted({locked_loan.item_id, candidate_item.pk})
+            locked_items = {
+                obj.pk: obj
+                for obj in Item.objects.select_for_update().filter(pk__in=item_ids).order_by("pk")
+            }
+            previous_item = locked_items[locked_loan.item_id]
+            target_item = locked_items[candidate_item.pk]
+            if "item" in validated_data:
+                validated_data["item"] = target_item
+
+            new_returned_at = validated_data.get("returned_at", locked_loan.returned_at)
+            if was_returned and new_returned_at is None:
+                raise serializers.ValidationError({
+                    "returned_at": "No se puede reabrir un préstamo ya devuelto."
+                })
+
+            if new_returned_at is None:
+                self._assert_item_available_for_loan(
+                    target_item,
+                    validated_data.get("user", locked_loan.user),
+                    instance=locked_loan,
+                )
+
+            reservation = None
+            if not was_returned and new_returned_at is None and target_item.pk != previous_item.pk:
+                reservation = Reservation.objects.select_for_update().filter(
+                    item=target_item,
+                    user=validated_data.get("user", locked_loan.user),
+                    status=Reservation.StatusReservation.PENDING,
+                    expires_at__gt=timezone.now(),
+                ).first()
+
+            try:
+                loan = super().update(locked_loan, validated_data)
+            except IntegrityError:
+                raise serializers.ValidationError({
+                    "item": "El ejemplar seleccionado ya se encuentra prestado o no está disponible."
+                })
+
+            # Si cambiaron el ejemplar físico, liberamos el anterior solo si figuraba prestado
+            if previous_item.pk != loan.item_id and previous_item.status == Item.Status.LOANED:
+                previous_item.status = Item.Status.AVAILABLE
+                previous_item.save(update_fields=["status", "updated_at"])
+
+            # Si ya tiene fecha de devolución, vuelve a AVAILABLE salvo que esté DAMAGED/LOST
+            current_item = locked_items[loan.item_id]
+            if loan.returned_at is not None:
+                if current_item.status not in (Item.Status.DAMAGED, Item.Status.LOST):
+                    current_item.status = Item.Status.AVAILABLE
+                    current_item.save(update_fields=["status", "updated_at"])
+            else:
+                if current_item.status != Item.Status.LOANED:
+                    current_item.status = Item.Status.LOANED
+                    current_item.save(update_fields=["status", "updated_at"])
+
+            if reservation:
+                reservation.status = Reservation.StatusReservation.COMPLETED
+                reservation.save(update_fields=["status", "updated_at"])
+
+            return loan
     
 
 class LoanReadSerializer(serializers.ModelSerializer):
