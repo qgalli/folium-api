@@ -64,21 +64,19 @@ graph TD
 ### Principales Patrones de Diseño Aplicados
 
 1. **Pipeline de Procesamiento de Medios (Pillow + WebP Optimization)**:
-   Ubicado en [`folium_api/image_utils.py`](file:///c:/Users/Facundo/Desktop/ReposGit/folium-api/folium_api/image_utils.py). Todas las imágenes subidas a través de [`Book.save()`](file:///c:/Users/Facundo/Desktop/ReposGit/folium-api/folium_api/models.py) o recuperadas externamente mediante el importador de ISBN son interceptadas, orientadas según metadatos EXIF, redimensionadas proporcionalmente con filtro `LANCZOS` a un máximo de `600×900 px` y codificadas en **WebP (`quality=82`)**. Reduce el peso de las portadas en un ~55% a ~95% sin degradación visual en pantallas de alta densidad.
+   Ubicado en `folium_api/image_utils.py`. Todas las imágenes subidas a través de `Book.save()` o recuperadas externamente mediante el importador de ISBN son interceptadas, orientadas según metadatos EXIF, redimensionadas proporcionalmente con filtro `LANCZOS` a un máximo de `600×900 px` y codificadas en **WebP (`quality=82`)**.
 2. **Entrega de Medios Compatible con Edge CDN (`media_views.py`)**:
-   Implementado en [`folium_api/media_views.py`](file:///c:/Users/Facundo/Desktop/ReposGit/folium-api/folium_api/media_views.py). Sirve archivos estáticos multimedia tanto en entornos de desarrollo como en contenedores de producción (`DEBUG=False`). Incluye:
-   - **Fallback transparente a `.webp`**: Si el cliente o una URL previa solicita `archivo.jpg` y el archivo fue optimizado a `archivo.webp`, lo resuelve automáticamente evitando errores `404 Not Found`.
-   - **Cabeceras Edge CDN**: Emite `ETag`, `Last-Modified`, soporte condicional `304 Not Modified`, `Cache-Control: public, max-age=31536000, s-maxage=31536000, stale-while-revalidate=2592000, immutable` y `Vercel-CDN-Cache-Control`.
+   Implementado en `folium_api/media_views.py`. Sirve archivos estáticos multimedia tanto en desarrollo como en producción (`DEBUG=False`), incluyendo fallback transparente a `.webp`, `ETag`, `Last-Modified`, `304 Not Modified` y cabeceras `Cache-Control` / `Vercel-CDN-Cache-Control`.
 3. **Patrón Strategy & Parser Registry (Motor de Importación)**:
-   La función `parse_uploaded_file` en [`importer_views.py`](file:///c:/Users/Facundo/Desktop/ReposGit/folium-api/folium_api/importer_views.py) implementa el patrón Estrategia mediante detección polimórfica (por extensión y sniffing byte-level de cabecera). Delega dinámicamente en parsers especializados (`parse_marc21_bytes`, `parse_marcxml_bytes`, `parse_bibtex_text`, `parse_excel_bytes`, `parse_csv_bytes`) sin acoplar la vista a ningún formato específico.
+   `parse_uploaded_file` en `folium_api/importer_views.py` detecta el formato por extensión y contenido y delega en `parse_xlsx_file`, `parse_csv_file`, `parse_bib_file`, `parse_marc21_bytes` y `parse_marcxml_bytes`, aplicando límites defensivos (10 MB de entrada, 50 MB XLSX descomprimido anti-zip-bomb, 10.000 filas y bloqueo de declaraciones XML `DOCTYPE`/`ENTITY`).
 4. **Patrón Service Object (Desacoplamiento de Pagos)**:
-   La interacción con la pasarela de MercadoPago está encapsulada en [`mercadopago_service.py`](file:///c:/Users/Facundo/Desktop/ReposGit/folium-api/folium_api/mercadopago_service.py), abstrayendo la SDK oficial, la construcción de preferencias, el catálogo de planes en memoria y la verificación de webhooks.
-5. **Transacciones Atómicas (`ACID Transactions`)**:
-   Tanto en la ejecución del importador masivo como en el procesamiento de préstamos, devoluciones y el comando de optimización de portadas (`optimize_covers`), se utiliza `transaction.atomic()`. Si un solo registro de un lote falla en modo estricto, la base de datos realiza un rollback completo.
+   La integración con MercadoPago vive en `folium_api/mercadopago_service.py` y `folium_api/billing_views.py`. La simulación local (`LOCAL_SIMULATION`) queda restringida a `DEBUG=True`; en producción (`DEBUG=False`) exige `MP_ACCESS_TOKEN`, firma HMAC-SHA256 en webhooks y validación estricta de `currency_id` y monto mínimo bajo `select_for_update()`.
+5. **Transacciones Atómicas y Bloqueo de Fila (`ACID Transactions`)**:
+   El importador masivo, la activación de suscripciones y la creación/actualización de préstamos (`LoanWriteSerializer`) utilizan `transaction.atomic()` junto con `select_for_update()` y la restricción parcial única `uniq_active_loan_per_item` en PostgreSQL para evitar dobles préstamos concurrentes.
 6. **Máquina de Estados Finita (FSM) para Ejemplares y Reservas**:
-   Las transiciones de estado de `Item.status` (`AVAILABLE` → `LOANED` → `AVAILABLE` / `DAMAGED` / `LOST`) y `Reservation.status` (`PENDING` → `COMPLETED` / `CANCELLED` / `EXPIRED`) están controladas mediante validaciones explícitas en los métodos `clean()` de los modelos.
+   Las transiciones de `Item.status` (`AVAILABLE`, `LOANED`, `RESERVED`, `DAMAGED`, `LOST`) se validan en `ItemSerializer` y `ItemViewSet`: los estados `LOANED`/`RESERVED` se gestionan únicamente desde préstamos y reservas, la rehabilitación de `DAMAGED`/`LOST` hacia `AVAILABLE` exige `POST /api/v1/items/{id}/mark-reviewed/`, y la eliminación de ejemplares con préstamos o reservas vigentes está bloqueada.
 7. **Borrado Lógico (Soft Delete)**:
-   Entidades críticas como `Book`, `User` y `Review` implementan el campo `deleted_at`. Las consultas habituales excluyen registros con marca de borrado preservando la integridad referencial histórica para préstamos pasados y estadísticas.
+   Entidades críticas como `Book`, `User` y `Review` implementan `deleted_at` para preservar la integridad histórica de préstamos y estadísticas sin exponer registros dados de baja.
 
 ---
 
@@ -237,102 +235,124 @@ Durante la importación masiva con la opción `fetch_covers_by_isbn` activa:
 
 ## 6. Módulo de Facturación y Suscripciones (MercadoPago)
 
-Ubicado en [`folium_api/mercadopago_service.py`](file:///c:/Users/Facundo/Desktop/ReposGit/folium-api/folium_api/mercadopago_service.py) y [`folium_api/billing_views.py`](file:///c:/Users/Facundo/Desktop/ReposGit/folium-api/folium_api/billing_views.py):
+Ubicado en `folium_api/mercadopago_service.py`, `folium_api/billing_models.py`, `folium_api/billing_serializers.py` y `folium_api/billing_views.py`:
 
-- **Catálogo de Planes Institucionales**:
-  - `PLAN_POPULAR` ($29.900 ARS/mes): Hasta 5.000 títulos, importador masivo completo (Excel, CSV, BibTeX, MARC 21, MARCXML), 3 cuentas de bibliotecario.
-  - `PLAN_ACADEMIC` ($59.900 ARS/mes): Hasta 25.000 títulos, 10 bibliotecarios, soporte de preservación digital.
-  - `PLAN_NETWORK` ($119.900 ARS/mes): Obras ilimitadas, multi-sucursal, API dedicada.
-- **Flujo de Pago**:
-  1. El cliente envía `POST /api/v1/billing/checkout/` con el `plan_id`.
-  2. El servicio genera la preferencia en MercadoPago configurando `back_urls` (éxito, fallo, pendiente), `auto_return: approved` y metadatos de auditoría.
-  3. Devuelve `init_point` para redirección transparente del usuario.
-  4. Los eventos de notificación IPN son recibidos en `POST /api/v1/billing/webhook/mercadopago/`, consultando el estado del pago mediante el SDK oficial y activando los permisos institucionales.
+- **Catálogo de Planes Institucionales (`LIBRARY_PLANS_CATALOG`)**:
+  - `BASIC` (*Folium Gestión*, `$247.000 ARS/mes` | `$205.800 ARS/mes` en ciclo anual, `$2.470.000 ARS` total anual): Hasta `10.000` libros, `25.000` ejemplares físicos, `3` bibliotecarios, importador masivo habilitado, `50 GB` almacenamiento S3 y `250 GB` CloudFront.
+  - `PRO` (*Folium Integral*, `$455.000 ARS/mes` | `$379.100 ARS/mes` en ciclo anual, `$4.550.000 ARS` total anual): Hasta `50.000` libros, `120.000` ejemplares físicos, `10` bibliotecarios, Portal del Lector, Coverflow 3D, importador masivo y soporte prioritario (`250 GB` S3 / `1000 GB` CloudFront).
+  - `PREMIUM` (*Folium Nexus AI*, `$767.000 ARS/mes` | `$639.100 ARS/mes` en ciclo anual, `$7.670.000 ARS` total anual): Obras, ejemplares y bibliotecarios ilimitados (`0`), Portal del Lector, Coverflow 3D, importador masivo, curador IA y soporte prioritario (`1000 GB` S3 / `5000 GB` CloudFront).
+- **Flujo de Pago y Hardening**:
+  1. `GET /api/v1/billing/plans/` expone el catálogo oficial de planes, límites y estado público de la pasarela.
+  2. `POST /api/v1/billing/checkout/` valida `plan_code`, `billing_cycle` (`MONTHLY`/`ANNUAL`), `organization_name`, `checkout_mode` (`PREFERENCE`/`SUBSCRIPTION`), opcionalmente `tax_id` y `payer_email`, calcula montos únicamente en servidor y crea una `LibrarySubscription` en estado `PENDING`.
+  3. El modo `LOCAL_SIMULATION` únicamente funciona cuando `DEBUG=True`; en producción (`DEBUG=False`), si falta `MP_ACCESS_TOKEN`, checkout y `GET /api/v1/billing/payment-status/` devuelven `502 Bad Gateway`.
+  4. `POST /api/v1/billing/webhook/mercadopago/` (y su alias sin barra `/api/v1/billing/webhook/mercadopago`) verifica la firma HMAC-SHA256 (`x-signature`, `x-request-id`, `ts`), rechaza webhooks sin firma válida con `401 Unauthorized` en producción, rechaza pagos `simulated=True` con `400`, valida `currency_id` y `transaction_amount >= expected_amount` bajo `transaction.atomic()` + `select_for_update()` antes de activar la suscripción.
 
 ---
 
 ## 7. Catálogo de Endpoints de la API
 
-Todas las rutas de la API están prefijadas por `/api/v1/`.
+Todas las rutas de la API están prefijadas por `/api/v1/` (salvo el acceso directo de descubrimiento y `/media/`).
+
+> **Regla de Trailing Slash (`APPEND_SLASH=True`)**: Por convención de Django/DRF, las peticiones mutadoras (`POST`, `PUT`, `PATCH`, `DELETE`) requieren `/` final. Las únicas excepciones explícitas que aceptan `POST` tanto con barra final como sin ella son `/api/v1/token`, `/api/v1/token/refresh` y `/api/v1/billing/webhook/mercadopago`.
 
 ### Autenticación y Cuentas
 | Método | Endpoint | Acceso | Descripción |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/token/` | Público | Obtención de tokens JWT (`access` y `refresh`) mediante `username` y `password`. Devuelve claims con rol. |
-| `POST` | `/token/refresh/` | Público | Renovación del `access` token mediante un `refresh` token válido. |
-| `POST` | `/register/` | Público | Autoregistro de nuevos lectores (`USER`). Valida DNI, email y contraseña. |
-| `GET` | `/me/` | Autenticado | Perfil detallado del usuario en sesión, estadísticas de lectura y rol. |
-| `PATCH` | `/me/` | Autenticado | Actualización de datos de perfil (nombre, apellido, teléfono). |
+| `POST` | `/token/` (y `/token`) | Público | Obtención de tokens JWT (`access` y `refresh`). Devuelve `user` (`id`, `username`, `rol`). |
+| `POST` | `/token/refresh/` (y `/token/refresh`) | Público | Renovación del `access` token mediante un `refresh` token válido (rotación con blacklist activa). |
+| `POST` | `/register/` | Público | Autoregistro de nuevos lectores (`USER`) con `AUTH_PASSWORD_VALIDATORS` habilitados. |
+| `GET`/`PUT`/`PATCH` | `/me/` | Autenticado | Consulta y actualización del perfil propio del usuario autenticado. |
+| `POST` | `/me/change-password/` | Autenticado | Cambio de contraseña del usuario autenticado validando contraseña actual y política de complejidad. |
+| `GET`/`POST`/`PUT`/`PATCH`/`DELETE` | `/user/` y `/users/` | Staff (`IsLibrarianOrAdminUser`) | Gestión de usuarios. `LIBRARIAN` no visualiza ni opera sobre cuentas `ADMIN`/`is_superuser` y solo `ADMIN` puede modificar `rol` a `ADMIN`, `is_active` o contraseñas de terceros. |
+| `GET` | `/user/by-dni/{dni}/` | Staff (`IsLibrarianOrAdminUser`) | Búsqueda de usuario por DNI (validado como entero PostgreSQL `1..2.147.483.647`); devuelve `400` si excede rango o `404` si no existe. |
 
-### Catálogo de Obras y Autores
+### Catálogo de Obras, Autores, Géneros, Editoriales y Favoritos
 | Método | Endpoint | Acceso | Descripción |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/book/` | **Público** (`AllowAny`) | Listado paginado de libros con filtros multicriterio (`search`, `genre`, `editorial`, `year`). Optimizado con `select_related`/`prefetch_related`. |
-| `POST` | `/book/` | Staff (`LIBRARIAN`, `ADMIN`) | Alta de obra con autores, géneros y subida multipart de portada (`cover_image` optimizada a WebP). |
-| `GET` | `/book/{id}/` | **Público** (`AllowAny`) | Ficha técnica completa de la obra, autores, géneros, stock disponible y promedio de calificaciones. |
-| `PUT`/`PATCH` | `/book/{id}/` | Staff | Modificación de metadatos de la obra. |
-| `DELETE` | `/book/{id}/` | Staff | Borrado lógico (`deleted_at = timezone.now()`). |
-| `GET` | `/author/` | Público | Listado de autores registrados. |
-| `POST` | `/author/` | Staff | Registro de nuevo autor. |
-| `GET` | `/genre/` | Público | Listado de géneros y materias bibliográficas. |
-| `GET` | `/editorial/` | Público | Listado completo de editoriales registradas para selectores y filtros. |
-| `POST` | `/editorial/` | Staff | Registro de nueva editorial. |
-| `GET` | `/random/` | Público | Devuelve un libro aleatorio para recomendaciones en landing. |
-| `GET` | `/recommendations/` | Público | Sugerencias literarias basadas en popularidad o similitud. |
+| `GET` | `/book/` | Público (`IsLibrarianOrPublicReadOnly`) | Listado paginado con orden determinístico `("title", "id")` y filtros (`search`/`q`, `genre`, `year` validado `1..2.147.483.647`, `available_only`). Optimizado en consultas constantes con `Prefetch`. |
+| `POST`/`PUT`/`PATCH`/`DELETE` | `/book/` y `/book/{id}/` | Staff (`IsLibrarianOrAdminUser`) | Alta, edición y soft delete (`deleted_at = now()`) de obras (rechaza borrado si existen préstamos activos o reservas pendientes). |
+| `POST` | `/book/{id}/restore/` | Staff (`IsLibrarianOrAdminUser`) | Restaura una obra eliminada lógicamente (`deleted_at = None`). |
+| `GET` | `/book/options/` | Público (`IsLibrarianOrPublicReadOnly`) | Selector liviano sin paginación (máximo 50 libros, soporte `?search=`/`?q=`). |
+| `GET` | `/book/available/` | Autenticado (`IsLibrarianOrReadOnly`) | Listado paginado de libros que poseen al menos un ejemplar `AVAILABLE` con el detalle de sus copias. |
+| `GET` | `/book/random/`, `/random/` | Público | Devuelve una obra aleatoria no eliminada (y sus métricas sin N+1). |
+| `GET` | `/book/recommendation/`, `/book/recommendations/`, `/recommendation/`, `/recommendations/` | Público | Top 10 obras ordenadas por promedio de calificación, cantidad de reseñas y `-id`. |
+| `GET`/`POST`/`PUT`/`PATCH`/`DELETE` | `/author/`, `/genre/`, `/editorial/` | Lectura Pública / Mutación Staff (`IsLibrarianOrPublicReadOnly`) | Gestión de autoridades, materias y sellos editoriales con orden determinístico y filtro `?search=`/`?q=`. |
+| `GET`/`POST`/`DELETE` | `/favorites/` | Autenticado (`IsAuthenticated`) | Lista favoritos del usuario. `POST` retorna `201` si se crea, `200` si ya existía (idempotente) y `400` si el libro está eliminado. |
 
 ### Ejemplares Físicos e Inventario (`/items/`)
 | Método | Endpoint | Acceso | Descripción |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/items/` | Staff | Listado de ejemplares con filtros por código de inventario, libro y estado. |
-| `POST` | `/items/` | Staff | Registro de nuevo ejemplar vinculado a un libro (`inventory_code`, `status`, `location`). |
-| `PATCH` | `/items/{id}/` | Staff | Cambio de estado o reubicación de sala. |
+| `GET` | `/items/` | Staff (`IsLibrarianOrAdminUser`) | Listado paginado con filtros `book` (`1..2.147.483.647`), `status`, `search`/`q` y `ordering`. |
+| `POST` | `/items/` | Staff (`IsLibrarianOrAdminUser`) | Registro de ejemplar (`LOANED`, `RESERVED` y libros eliminados están bloqueados con `400`). |
+| `PUT`/`PATCH` | `/items/{id}/` | Staff (`IsLibrarianOrAdminUser`) | Edición sujeta a FSM: bloquea `DAMAGED`/`LOST → AVAILABLE`, asignaciones manuales a `LOANED`/`RESERVED` y cambios de estado si hay préstamo activo o reserva vigente. |
+| `POST` | `/items/{id}/mark-reviewed/` | Staff (`IsLibrarianOrAdminUser`) | Rehabilita de manera atómica un ejemplar `DAMAGED` o `LOST` a `AVAILABLE` tras revisión física y devuelve `ItemReadSerializer`. |
+| `DELETE` | `/items/{id}/` | Staff (`IsLibrarianOrAdminUser`) | Bloquea el borrado físico (`400`) si el ejemplar tiene un préstamo activo (`LOANED` / `returned_at__isnull=True`) o reserva pendiente vigente. |
 
 ### Circulación y Préstamos (`/loan/`)
 | Método | Endpoint | Acceso | Descripción |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/loan/` | Autenticado | Lista préstamos propios para `USER` o globales para `LIBRARIAN`/`ADMIN`. Acepta filtros `user` (nombre, apellido, email, username o ID), `item` (título, código de inventario o ID), `status` (`active`, `overdue`, `returned`) y ordenamiento mediante `ordering` (`item`, `id`, `-id`, `loaned_at`, `-loaned_at`, `remaining`, `-remaining`). Paginado con `page` y `page_size` (20 por defecto, máximo 50); devuelve `count`, `next`, `previous`, `results` y `summary`: `due_today` cuenta los préstamos sin devolución cuya fecha local de vencimiento es hoy; `due_total` cuenta todos los préstamos sin devolución, incluidos los vencidos; `overdue` cuenta los préstamos sin devolución cuya fecha de vencimiento ya pasó. El resumen se calcula sobre todos los préstamos visibles para el usuario autenticado y no cambia con los filtros ni la página. El orden `remaining` agrupa activos, vencidos y devueltos en ese orden; el prefijo `-` invierte el orden dentro de cada grupo. |
-| `POST` | `/loan/` | Staff | Creación de préstamo asociando un `Item` disponible a un `User`. Cambia el estado del ítem a `LOANED`. |
-| `POST` | `/loan/{id}/return_book/` | Staff | Registra `returned_at = now()` y devuelve el ítem a `AVAILABLE` de forma atómica. |
+| `GET` | `/loan/` | Autenticado (`IsLibrarianOrReadOnly`) | Lista préstamos propios (`USER`) o globales (`LIBRARIAN`/`ADMIN`). Filtros `user`, `item`, `status` (`active`, `overdue`, `returned`) y `ordering`. Incluye `summary` (`due_today`, `due_total`, `overdue`). |
+| `POST` | `/loan/` | Staff (`IsLibrarianOrAdminUser`) | Crea préstamo bajo `transaction.atomic()` + `select_for_update()` (preserva flujo `RESERVED → LOANED` para el usuario que reservó y aplica `uniq_active_loan_per_item` en BD). |
+| `PUT`/`PATCH` | `/loan/{id}/` | Staff (`IsLibrarianOrAdminUser`) | Registra devolución (`returned_at`) o actualiza vencimiento; impide reabrir préstamos ya devueltos y no sobrescribe ejemplares marcados como `DAMAGED`/`LOST`. |
 
-### Reservas y Reseñas
+### Reservas (`/reservations/`) y Reseñas (`/reviews/`)
 | Método | Endpoint | Acceso | Descripción |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/reservations/` | Autenticado | Devuelve una lista completa, sin paginación, de las reservas propias para `USER` o globales para `LIBRARIAN`/`ADMIN`. Acepta filtros opcionales `user` (nombre, apellido, username, email o ID exacto), `book` (título, ISBN o ID exacto), `status` (`pending`, `expired`, `completed`, `cancelled`) y ordenamiento `ordering` (`created_at`, `-created_at`, `title`). El orden por fecha prioriza pendientes vigentes, expiradas, completadas y canceladas; dentro de cada grupo aplica la dirección de fecha elegida. Las reservas `PENDING` con `expires_at` pasado se consideran expiradas para filtrar, ordenar y contar. |
-| `GET` | `/reservations/summary/` | Autenticado | Devuelve los conteos visibles para el usuario autenticado: `pending`, `completed` y `cancelled`. Las pendientes expiradas no se incluyen en `pending`. |
-| `POST` | `/reservations/` | Autenticado (`USER`) | Reserva un libro sin stock disponible inmediato. Asigna fecha de expiración por defecto. |
-| `PATCH` | `/reservations/{id}/` | Autenticado | Cancelación voluntaria por parte del usuario o resolución por bibliotecario. |
-| `GET` | `/reviews/?book={id}` | Público | Lista de reseñas y comentarios aprobados para un libro. |
-| `POST` | `/reviews/` | Autenticado (`USER`) | Publica una calificación (1 a 5) y comentario para una obra leída. |
+| `GET` | `/reservations/` | Autenticado (`IsAuthenticated`) | Reservas propias (`USER`) o globales (`LIBRARIAN`/`ADMIN`) con filtros `user`, `book`, `status` y `ordering`. |
+| `GET` | `/reservations/summary/` | Autenticado | Conteos `pending`, `completed` y `cancelled` visibles para el usuario. |
+| `POST` | `/reservations/` | Autenticado | Crea una reserva sobre un ejemplar disponible o libro según reglas de vigencia. |
+| `PUT`/`PATCH` | `/reservations/{id}/` | Autenticado (Owner o Staff) | Actualización/resolución controlada según rol y estado. |
+| `POST`/`PATCH` | `/reservations/{id}/cancel/` | Autenticado (Owner o Staff) | Cancela la reserva pendiente y libera el ejemplar asociado si corresponde. |
+| `GET` | `/reviews/` y `/reviews/?book={id}` | Autenticado (`IsAuthenticated`) | Sin `?book=` lista reseñas propias del usuario; con `?book=` (`1..2.147.483.647`) lista todas las reseñas activas del libro. |
+| `POST`/`PUT`/`PATCH`/`DELETE` | `/reviews/` | Autenticado | Creación para cualquier usuario autenticado; edición exclusiva del autor; eliminación permitida al autor o Staff. |
+
+### Importador Masivo (`/importer/`) y Facturación (`/billing/`)
+| Método | Endpoint | Acceso | Descripción |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/importer/preview/`, `/simulate/`, `/execute/`, `/fetch-covers/` | Staff (`IsLibrarianOrAdminUser`) | Pipeline de previsualización, simulación, ejecución atómica y descarga de portadas (máx. 10 MB, 50 MB XLSX descomprimido, 10.000 filas, bloqueo XML `DOCTYPE`/`ENTITY`). |
+| `GET` | `/billing/plans/`, `/billing/payment-status/` | Público | Consulta de planes oficiales y verificación server-to-server de estado de pago en MercadoPago. |
+| `POST` | `/billing/checkout/`, `/billing/webhook/mercadopago/` | Público | Generación de checkout/suscripción y receptor de webhooks HMAC-SHA256. |
 
 ### Entrega de Archivos Multimedia (Nivel Raíz)
 | Método | Endpoint | Acceso | Descripción |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/media/{path}` | Público | Entrega optimizada de portadas con soporte ETag, 304 Not Modified, cabeceras CDN inmutables y fallback transparente a WebP. |
+| `GET` | `/media/{path}` | Público | Entrega optimizada de portadas con soporte `ETag`, `304 Not Modified`, cabeceras CDN y fallback transparente a `.webp`. |
 
 ---
 
 ## 8. Seguridad, Autorización y RBAC
 
 1. **Tokens JWT Personalizados**:
-   Implementados con `django-rest-framework-simplejwt`. La vista `FoliumTokenObtainPairView` inyecta en el payload del token los claims `user_id`, `username`, `email` y `rol`.
-2. **Matriz de Control de Acceso (RBAC)**:
-   - `IsLibrarianOrAdminUser`: Permiso personalizado que valida si `request.user.rol` es `LIBRARIAN` o `ADMIN`, o si el usuario tiene `is_staff=True`.
-   - `BookViewSet`: Lectura pública (`AllowAny`), mutación reservada a `IsLibrarianOrAdminUser`.
-   - Restricción por Ownership: En vistas como `/reservations/` o `/loan/`, los lectores solo pueden consultar y operar sobre sus propios registros, mientras que los bibliotecarios tienen visibilidad global.
-3. **Validación Criptográfica y de Integridad**:
-   - Algoritmo de verificación de ISBN (10 y 13 dígitos) con cálculo de dígito verificador.
-   - Prevención de inyección SQL mediante el uso estricto del ORM de Django.
-   - Sanitización de nombres contra vectores XSS mediante expresiones regulares en los modelos.
-4. **Protección de Datos y Manejo de Errores**:
-   - En modo producción (`DEBUG=False`), los errores 500 omiten trazas internas sensibles y devuelven respuestas JSON homogéneas.
+   Implementados con `django-rest-framework-simplejwt` (`ACCESS_TOKEN_LIFETIME = 15 min`, `REFRESH_TOKEN_LIFETIME = 1 día`, `ROTATE_REFRESH_TOKENS = True`, `BLACKLIST_AFTER_ROTATION = True`). `FoliumTokenObtainPairSerializer.get_token()` inyecta el claim `rol` (junto con `user_id`), y la respuesta JSON del login incluye `user: {id, username, rol}`.
+2. **Respuestas 401 Homogéneas y Auditoría**:
+   El `EXCEPTION_HANDLER` personalizado (`folium_api/exceptions.py`) registra en servidor (`logger.warning`) el motivo exacto de todo error `NotAuthenticated` / `AuthenticationFailed` y devuelve una respuesta uniforme (`401 Unauthorized`, `{"detail": "Credenciales inválidas o sesión no autorizada."}`) para evitar enumeración de usuarios o filtración de detalles JWT internos.
+3. **Matriz de Control de Acceso (RBAC)**:
+   - `is_admin`: Valida `rol == ADMIN` o `is_superuser` para gestión de cuentas administradoras, cambios de `rol` a `ADMIN`, `is_active` y restablecimiento de contraseñas de terceros.
+   - `IsLibrarianOrAdminUser`: Autoriza únicamente `LIBRARIAN`/`ADMIN`/`is_staff`/`is_superuser` (inventario `/items/`, usuarios `/user/`, importador `/importer/`, `/book/{id}/restore/`).
+   - `IsLibrarianOrPublicReadOnly`: Lectura pública y escritura Staff (`/book/`, `/author/`, `/genre/`, `/editorial/`).
+   - `IsLibrarianOrReadOnly`: Lectura autenticada y escritura Staff (`/loan/`, `/book/available/`).
+   - `IsAuthenticated` con Ownership: `/favorites/`, `/reservations/`, `/reviews/`, `/me/`.
+4. **Endurecimiento en Producción (`settings.py` y `Dockerfile`)**:
+   - `LANGUAGE_CODE = 'es-ar'`, `DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'`, `EMAIL_BACKEND` estándar de Django (configurable por variables `EMAIL_*` con fallback a consola).
+   - Con `DEBUG=False` se deshabilita `BasicAuthentication`, se unifican `FRONTEND_URLS`/`FRONTEND_URL` para CORS y `CSRF_TRUSTED_ORIGINS`, se configuran `SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')` y `NUM_PROXIES`, y se habilitan redirección/HSTS/cookies `Secure` de forma condicional mediante `ENABLE_HTTPS_REDIRECT=True` para convivir de forma segura tanto detrás de proxies TLS como de proxies HTTP hacia EC2.
+   - La imagen `Dockerfile` arranca WSGI en producción con **Gunicorn** (`folium.wsgi:application`).
 
 ---
 
 ## 9. Despliegue, Migraciones y Guía de Operaciones
 
+### Variables de Entorno Clave en Producción
+
+- `SECRET_KEY`, `DEBUG=False`, `ALLOWED_HOSTS`
+- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`
+- `FRONTEND_URLS` / `FRONTEND_URL`, `CSRF_TRUSTED_ORIGINS`
+- `ENABLE_HTTPS_REDIRECT` (`False` por defecto; usar `True` únicamente si el proxy termina TLS con `X-Forwarded-Proto: https`) y `NUM_PROXIES` (`1` por defecto)
+- `MP_ACCESS_TOKEN`, `MP_PUBLIC_KEY`, `MP_WEBHOOK_SECRET` (obligatorios cuando `DEBUG=False`)
+- `EMAIL_BACKEND` / `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS`, `DEFAULT_FROM_EMAIL`
+
 ### Pasos de Despliegue en Servidor (AWS EC2 / Producción)
 
-Para poner en producción los últimos cambios de backend (incluyendo la migración a WebP y el soporte CDN):
+Para poner en producción los últimos cambios de backend (incluyendo Gunicorn, migraciones y soporte CDN):
 
 ```bash
 # 1. Traer los últimos cambios de la rama testing o main
