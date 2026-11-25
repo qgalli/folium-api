@@ -1701,3 +1701,98 @@ class BillingMercadoPagoTests(APITestCase):
             PaymentTransaction.objects.filter(mp_payment_id="PAYMENT-123").count(),
             1,
         )
+
+
+class UserPrivilegeEscalationTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="priv-admin",
+            dni=91000001,
+            email="priv-admin@example.com",
+            password="StrongAdminPassword-123!",
+            rol=User.Rol.ADMIN,
+        )
+        self.librarian = User.objects.create_user(
+            username="priv-librarian",
+            dni=91000002,
+            email="priv-librarian@example.com",
+            password="StrongLibrarianPassword-123!",
+            rol=User.Rol.LIBRARIAN,
+        )
+        self.reader = User.objects.create_user(
+            username="priv-reader",
+            dni=91000003,
+            email="priv-reader@example.com",
+            password="StrongReaderPassword-123!",
+            rol=User.Rol.USER,
+        )
+
+    def test_librarian_cannot_create_or_promote_to_admin(self):
+        self.client.force_authenticate(user=self.librarian)
+        create_res = self.client.post(
+            "/api/v1/user/",
+            {
+                "username": "new-admin",
+                "dni": 91000004,
+                "email": "new-admin@example.com",
+                "rol": User.Rol.ADMIN,
+            },
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_400_BAD_REQUEST)
+
+        promote_res = self.client.patch(
+            f"/api/v1/user/{self.reader.id}/",
+            {"rol": User.Rol.ADMIN},
+            format="json",
+        )
+        self.assertEqual(promote_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.reader.refresh_from_db()
+        self.assertEqual(self.reader.rol, User.Rol.USER)
+
+    def test_librarian_cannot_view_or_modify_admin_or_other_user_password(self):
+        self.client.force_authenticate(user=self.librarian)
+
+        list_res = self.client.get("/api/v1/user/")
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        returned_ids = [u["id"] for u in list_res.data]
+        self.assertNotIn(self.admin.id, returned_ids)
+        self.assertIn(self.reader.id, returned_ids)
+
+        by_dni_res = self.client.get(f"/api/v1/user/by-dni/{self.admin.dni}/")
+        self.assertEqual(by_dni_res.status_code, status.HTTP_404_NOT_FOUND)
+
+        patch_admin = self.client.patch(
+            f"/api/v1/user/{self.admin.id}/",
+            {"password": "HackedPassword-123!"},
+            format="json",
+        )
+        self.assertEqual(patch_admin.status_code, status.HTTP_404_NOT_FOUND)
+
+        patch_reader_pw = self.client.patch(
+            f"/api/v1/user/{self.reader.id}/",
+            {"password": "OtherPassword-123!"},
+            format="json",
+        )
+        self.assertEqual(patch_reader_pw.status_code, status.HTTP_400_BAD_REQUEST)
+        self.reader.refresh_from_db()
+        self.assertTrue(self.reader.check_password("StrongReaderPassword-123!"))
+
+        patch_reader_active = self.client.patch(
+            f"/api/v1/user/{self.reader.id}/",
+            {"is_active": False},
+            format="json",
+        )
+        self.assertEqual(patch_reader_active.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_admin_can_manage_roles_and_passwords(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.patch(
+            f"/api/v1/user/{self.librarian.id}/",
+            {"rol": User.Rol.ADMIN, "password": "RotatedAdminPassword-123!"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.librarian.refresh_from_db()
+        self.assertEqual(self.librarian.rol, User.Rol.ADMIN)
+        self.assertTrue(self.librarian.check_password("RotatedAdminPassword-123!"))

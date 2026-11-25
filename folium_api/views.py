@@ -28,6 +28,7 @@ from .passwords import generate_temporary_password
 from .serializers import *
 from rest_framework.exceptions import ValidationError
 from .permissions import (
+        is_admin,
         is_librarian_or_admin,
         IsLibrarianOrReadOnly,
         IsLibrarianOrPublicReadOnly,
@@ -708,6 +709,8 @@ class UserViewSet(viewsets.ModelViewSet):
 
         def get_queryset(self):
                 qs = User.objects.filter(deleted_at__isnull=True)
+                if not is_admin(self.request.user):
+                        qs = qs.exclude(Q(rol=User.Rol.ADMIN) | Q(is_superuser=True))
                 dni = self.request.query_params.get('dni')
                 search = self.request.query_params.get('search') or self.request.query_params.get('q')
                 rol = self.request.query_params.get('rol')
@@ -736,8 +739,11 @@ class UserViewSet(viewsets.ModelViewSet):
         @action(detail=False, methods=['get'], url_path=r'by-dni/(?P<dni>\d+)')
         def by_dni(self, request, dni=None):
                 try:
-                        user = User.objects.get(dni=int(dni), deleted_at__isnull=True)
-                        serializer = UserSerializer(user)
+                        qs = User.objects.filter(deleted_at__isnull=True)
+                        if not is_admin(request.user):
+                                qs = qs.exclude(Q(rol=User.Rol.ADMIN) | Q(is_superuser=True))
+                        user = qs.get(dni=int(dni))
+                        serializer = UserSerializer(user, context={'request': request})
                         active_loans_count = Loan.objects.filter(user=user, returned_at__isnull=True).count()
                         data = serializer.data
                         data['active_loans_count'] = active_loans_count

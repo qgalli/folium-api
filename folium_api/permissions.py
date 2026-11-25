@@ -27,6 +27,20 @@ def is_librarian_or_admin(user):
     )
 
 
+def is_admin(user):
+    """
+    Devuelve True si el usuario está autenticado y es Administrador (ADMIN)
+    o superusuario.
+    """
+    if not (user and user.is_authenticated):
+        return False
+
+    return bool(
+        getattr(user, "rol", None) == User.Rol.ADMIN
+        or user.is_superuser
+    )
+
+
 class IsLibrarianOrAdminUser(permissions.BasePermission):
     """
     Autoriza únicamente a usuarios con rol LIBRARIAN o ADMIN (o staff/superusuario).

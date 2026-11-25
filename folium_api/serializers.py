@@ -9,6 +9,7 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.db.models import Avg
 from .models import * # Importamos todos los modelos del archivo `models.py` (que está en este mismo directorio)
+from .permissions import is_admin
 
 # Crear serializadores acá
 # Para más info copada referirse a: https://www.django-rest-framework.org/tutorial/1-serialization/
@@ -229,6 +230,35 @@ class UserSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError("Ya existe un usuario registrado con este DNI.")
         return value
+
+    def validate_rol(self, value):
+        request = self.context.get("request")
+        actor = getattr(request, "user", None)
+        if actor and actor.is_authenticated and not is_admin(actor):
+            current_rol = getattr(self.instance, "rol", None)
+            if value == User.Rol.ADMIN or (value != User.Rol.USER and value != current_rol):
+                raise serializers.ValidationError("Solo un administrador puede asignar ese rol.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        request = self.context.get("request")
+        actor = getattr(request, "user", None)
+        if actor and actor.is_authenticated and not is_admin(actor) and self.instance:
+            if self.instance.rol == User.Rol.ADMIN or self.instance.is_superuser:
+                raise serializers.ValidationError(
+                    "Solo un administrador puede gestionar cuentas administrativas."
+                )
+            if actor.pk != self.instance.pk:
+                if "password" in attrs:
+                    raise serializers.ValidationError({
+                        "password": "No puedes cambiar la contraseña de otro usuario."
+                    })
+                if "is_active" in attrs and attrs["is_active"] != self.instance.is_active:
+                    raise serializers.ValidationError({
+                        "is_active": "Solo un administrador puede cambiar el estado activo de otro usuario."
+                    })
+        return attrs
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
