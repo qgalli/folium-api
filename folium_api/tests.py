@@ -1932,3 +1932,52 @@ class SeedDataSafetyTests(APITestCase):
         self.assertTrue(Reservation.objects.filter(pk=reservation.pk).exists())
         item.refresh_from_db()
         self.assertEqual(item.status, Item.Status.LOANED)
+
+
+class AuthExceptionHandlerTests(APITestCase):
+    def setUp(self):
+        self.inactive_user = User.objects.create_user(
+            username="inactive-reader",
+            dni=91300001,
+            email="inactive@example.com",
+            password="StrongPassword-123!",
+            is_active=False,
+        )
+
+    def test_401_responses_are_uniform_and_logged(self):
+        from folium_api.exceptions import UNIFORM_AUTH_ERROR_DETAIL
+
+        with self.assertLogs("folium_api.auth", level="WARNING") as unauth_logs:
+            unauth_res = self.client.get("/api/v1/user/")
+        self.assertEqual(unauth_res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(unauth_res.data, {"detail": UNIFORM_AUTH_ERROR_DETAIL})
+        self.assertTrue(unauth_logs.output)
+
+        with self.assertLogs("folium_api.auth", level="WARNING") as bad_creds_logs:
+            bad_creds_res = self.client.post(
+                reverse("token_obtain_pair"),
+                {"username": "nonexistent", "password": "wrong"},
+                format="json",
+            )
+        self.assertEqual(bad_creds_res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(bad_creds_res.data, {"detail": UNIFORM_AUTH_ERROR_DETAIL})
+        self.assertTrue(bad_creds_logs.output)
+
+        with self.assertLogs("folium_api.auth", level="WARNING") as inactive_logs:
+            inactive_res = self.client.post(
+                reverse("token_obtain_pair"),
+                {"username": "inactive-reader", "password": "StrongPassword-123!"},
+                format="json",
+            )
+        self.assertEqual(inactive_res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(inactive_res.data, {"detail": UNIFORM_AUTH_ERROR_DETAIL})
+        self.assertTrue(inactive_logs.output)
+
+        with self.assertLogs("folium_api.auth", level="WARNING") as jwt_logs:
+            bad_jwt_res = self.client.get(
+                "/api/v1/user/",
+                HTTP_AUTHORIZATION="Bearer not.a.valid.jwt",
+            )
+        self.assertEqual(bad_jwt_res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(bad_jwt_res.data, {"detail": UNIFORM_AUTH_ERROR_DETAIL})
+        self.assertTrue(jwt_logs.output)
