@@ -2055,3 +2055,12 @@ class FavoriteBehaviorTests(APITestCase):
         )
         self.assertEqual(deleted_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("book", deleted_res.data)
+
+
+class BookOptionsHttpHandlerTests(APITestCase):
+    def test_http_options_and_book_options_action_both_work(self):
+        options_meta = self.client.options("/api/v1/book/")
+        self.assertEqual(options_meta.status_code, status.HTTP_200_OK)
+
+        book_options_res = self.client.get(reverse("folium_api:book-options"))
+        self.assertEqual(book_options_res.status_code, status.HTTP_200_OK)

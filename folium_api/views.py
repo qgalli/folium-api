@@ -461,8 +461,8 @@ class BookViewSet(viewsets.ModelViewSet):
                 """
                 return BookRecommendationView.as_view()(request._request, *args, **kwargs)
 
-        @action(detail=False, methods=['get'], permission_classes=[IsLibrarianOrPublicReadOnly], url_path='options')
-        def options(self, request, *args, **kwargs):
+        @action(detail=False, methods=['get'], permission_classes=[IsLibrarianOrPublicReadOnly], url_path='options', url_name='options')
+        def book_options(self, request, *args, **kwargs):
                 """
                 Endpoint liviano sin paginación (máximo 50 resultados) para alimentar
                 selectores y buscadores en formularios (ItemForm, ItemEditModal).
