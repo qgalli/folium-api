@@ -1796,3 +1796,72 @@ class UserPrivilegeEscalationTests(APITestCase):
         self.librarian.refresh_from_db()
         self.assertEqual(self.librarian.rol, User.Rol.ADMIN)
         self.assertTrue(self.librarian.check_password("RotatedAdminPassword-123!"))
+
+
+class PasswordPolicyValidationTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="pw-admin",
+            dni=91100001,
+            email="pw-admin@example.com",
+            password="StrongAdminPassword-123!",
+            rol=User.Rol.ADMIN,
+        )
+
+    def test_register_rejects_numeric_common_and_similar_passwords(self):
+        for bad_pw in ("12345678", "password", "lectornuevo1"):
+            with self.subTest(password=bad_pw):
+                res = self.client.post(
+                    reverse("folium_api:reader-register"),
+                    {
+                        "username": "lectornuevo1",
+                        "dni": 91100002,
+                        "first_name": "Lector",
+                        "last_name": "Nuevo",
+                        "email": "lectornuevo1@example.com",
+                        "password": bad_pw,
+                    },
+                    format="json",
+                )
+                self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("password", res.data)
+
+    def test_user_create_and_update_enforce_password_validators(self):
+        self.client.force_authenticate(user=self.admin)
+        create_res = self.client.post(
+            "/api/v1/user/",
+            {
+                "username": "usuariodeprueba",
+                "dni": 91100003,
+                "first_name": "Maria",
+                "last_name": "Lopez",
+                "email": "maria.lopez@example.com",
+                "password": "usuariodeprueba",
+            },
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("password", create_res.data)
+
+        valid_res = self.client.post(
+            "/api/v1/user/",
+            {
+                "username": "usuariodeprueba",
+                "dni": 91100003,
+                "first_name": "Maria",
+                "last_name": "Lopez",
+                "email": "maria.lopez@example.com",
+                "password": "Complex-User-Secret-2026!",
+            },
+            format="json",
+        )
+        self.assertEqual(valid_res.status_code, status.HTTP_201_CREATED)
+        user_id = valid_res.data["id"]
+
+        patch_res = self.client.patch(
+            f"/api/v1/user/{user_id}/",
+            {"password": "12345678"},
+            format="json",
+        )
+        self.assertEqual(patch_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("password", patch_res.data)

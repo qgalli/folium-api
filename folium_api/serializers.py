@@ -28,6 +28,22 @@ from .permissions import is_admin
 User = get_user_model()
 
 
+def _validate_user_password(password, attrs, instance=None):
+    """Ejecuta AUTH_PASSWORD_VALIDATORS considerando los atributos del usuario."""
+    if not password:
+        return
+    candidate = User(
+        username=attrs.get("username", getattr(instance, "username", "")),
+        first_name=attrs.get("first_name", getattr(instance, "first_name", "")),
+        last_name=attrs.get("last_name", getattr(instance, "last_name", "")),
+        email=attrs.get("email", getattr(instance, "email", "")),
+    )
+    try:
+        validate_password(password, user=candidate)
+    except DjangoValidationError as error:
+        raise serializers.ValidationError({"password": list(error.messages)}) from error
+
+
 class ChangePasswordSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True, trim_whitespace=False)
     new_password = serializers.CharField(write_only=True, trim_whitespace=False)
@@ -258,6 +274,8 @@ class UserSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         "is_active": "Solo un administrador puede cambiar el estado activo de otro usuario."
                     })
+        if "password" in attrs:
+            _validate_user_password(attrs.get("password"), attrs, instance=self.instance)
         return attrs
 
     def create(self, validated_data):
@@ -344,6 +362,11 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         if User.objects.filter(dni=value).exists():
             raise serializers.ValidationError("Ya existe un usuario registrado con este DNI.")
         return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        _validate_user_password(attrs.get("password"), attrs)
+        return attrs
 
     def create(self, validated_data):
         password = validated_data.pop("password")
